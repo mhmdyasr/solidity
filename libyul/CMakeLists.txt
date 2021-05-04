@@ -34,6 +34,8 @@ add_library(yul
 	AssemblyStack.cpp
 	CompilabilityChecker.cpp
 	CompilabilityChecker.h
+	DataFlowGraph.cpp
+	DataFlowGraph.h
 	Dialect.cpp
 	Dialect.h
 	Exceptions.h
@@ -67,6 +69,8 @@ add_library(yul
 	backends/evm/EVMMetrics.h
 	backends/evm/NoOutputAssembly.h
 	backends/evm/NoOutputAssembly.cpp
+	backends/evm/OptimizedEVMCodeTransform.cpp
+	backends/evm/OptimizedEVMCodeTransform.h
 	backends/evm/VariableReferenceCounter.h
 	backends/evm/VariableReferenceCounter.cpp
 	backends/wasm/EVMToEwasmTranslator.cpp
