@@ -40,6 +40,14 @@ namespace solidity::yul
 {
 struct AsmAnalysisInfo;
 
+struct OptimizedCodeTransformContext
+{
+	std::map<Scope::Function const*, std::pair<BasicBlock*, BasicBlock*>> const& functionBlocks;
+	std::list<BasicBlock const*> queuedBlocks;
+	std::map<BasicBlock const*, AbstractAssembly::LabelID> blockLabels;
+	std::set<BasicBlock const*> generatedBlocks;
+};
+
 class OptimizedCodeTransform
 {
 public:
@@ -52,28 +60,21 @@ public:
 		ExternalIdentifierAccess const& _identifierAccess = ExternalIdentifierAccess(),
 		bool _useNamedLabelsForFunctions = false
 	);
-public:
-	void operator()(FunctionCallSlot const&);
-	void operator()(ExternalIdentifierSlot const&);
-	void operator()(LiteralSlot const&);
-	void operator()(VariableSlot const&);
-	void operator()(JunkSlot const&) { yulAssert(false, ""); }
-	void operator()(ReturnLabelSlot const&) { yulAssert(false, ""); }
 private:
-	OptimizedCodeTransform(AbstractAssembly& _assembly, BuiltinContext& _builtinContext, bool _useNamedLabelsForFunctions);
+	OptimizedCodeTransform(OptimizedCodeTransformContext& _context, AbstractAssembly& _assembly, BuiltinContext& _builtinContext, bool _useNamedLabelsForFunctions);
 
 	void visit(BasicBlock const& _basicBlock);
 	void visit(BasicBlockEntry const& _basicBlock);
-	void visit(StackSlot const& _expression);
 
 	void changeCurrentStackLayout(StackLayout const& _targetLayout);
 
+	OptimizedCodeTransformContext& m_context;
 	AbstractAssembly& m_assembly;
 	BuiltinContext& m_builtinContext;
 	bool const m_useNamedLabelsForFunctions = true;
-	StackSlot const* m_currentExpressionNode = nullptr;
 	std::vector<StackSlot const*> m_currentStack;
-	std::map<Scope::Function const*, AbstractAssembly::LabelID> m_neededFunctions;
+
+
 	std::optional<AbstractAssembly::LabelID> m_currentFunctionExit;
 	void popLast(size_t n)
 	{

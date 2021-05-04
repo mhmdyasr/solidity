@@ -21,38 +21,72 @@
 
 #include <libsolutil/Visitor.h>
 
+#include <range/v3/view/drop_last.hpp>
 #include <range/v3/view/enumerate.hpp>
+#include <range/v3/view/map.hpp>
 #include <range/v3/view/reverse.hpp>
+#include <range/v3/view/take_last.hpp>
 
+using namespace solidity;
 using namespace solidity::yul;
 using namespace std;
 
 
-namespace {
 // Debugging
-std::string SlotToString(StackSlot const& _slot)
-{
-	return std::visit(solidity::util::GenericVisitor{
-		[](FunctionCallSlot const& _functionCall) { return "CALL(" + _functionCall.call().functionName.name.str() + ")"; },
-		[](ExternalIdentifierSlot const& _externalIdentifier) { return "EXT(" + _externalIdentifier.identifier().name.str() + ")"; },
-		[](LiteralSlot const& _literal) { return "LITERAL(" + solidity::util::toHex(_literal.value(), solidity::util::HexPrefix::Add) + ")"; },
-		[](VariableSlot const& _variable) { return "VAR(" + _variable.variable().name.str() + ")"; },
-		[](JunkSlot const&) { return string("JUNK"); },
-		[](ReturnLabelSlot const&) { return string("RETURNLABEL"); },
-		[](auto const&) { return string("UNKNOWN"); }
-	}, _slot.content);
-}
+namespace {
 void PrintStackLayout(StackLayout const& _layout)
 {
-	std::cout << "[ ";
-	for (auto const& slot: _layout)
-		std::cout << SlotToString(*slot) << " ";
-	std::cout << "]" << std::endl;
-}
+	std::cout << StackLayoutToString(_layout) << std::endl;
 }
 
-OptimizedCodeTransform::OptimizedCodeTransform(AbstractAssembly& _assembly, BuiltinContext& _builtinContext, bool _useNamedLabelsForFunctions):
-m_assembly(_assembly), m_builtinContext(_builtinContext), m_useNamedLabelsForFunctions(_useNamedLabelsForFunctions)
+void markJunk(BasicBlock&, BasicBlock& _exit)
+{
+	static StackSlot junkSlot(JunkSlot{});
+
+	std::set<Scope::Variable const*> liveVariables;
+	std::cout << "MARK AS JUNK" << std::endl;
+	for (auto const* stackSlot: _exit.finalLayout)
+		if (VariableSlot const* variable = std::get_if<VariableSlot>(&stackSlot->content))
+			liveVariables.insert(&variable->variable());
+
+	PrintStackLayout(_exit.finalLayout);
+	size_t operationArguments = 0;
+	for (BasicBlockEntry& entry: _exit.content | ranges::views::reverse)
+	{
+		for (auto const*& stackSlot: entry.outputLayout | ranges::views::drop_last(operationArguments))
+			if (VariableSlot const* variable = std::get_if<VariableSlot>(&stackSlot->content))
+				if (!liveVariables.count(&variable->variable()))
+					stackSlot = &junkSlot;
+		for (auto const*& stackSlot: entry.outputLayout | ranges::views::take_last(operationArguments))
+			if (VariableSlot const* variable = std::get_if<VariableSlot>(&stackSlot->content))
+				liveVariables.insert(&variable->variable());
+		operationArguments = 0;
+		visit(util::GenericVisitor{
+			[&](BuiltinCallOperation const& _builtinCall)
+			{
+				operationArguments = _builtinCall.properArgumentCount();
+			},
+			[&](FunctionCallOperation const& _functionCall)
+			{
+				operationArguments = _functionCall.function().arguments.size();
+			},
+			[](StackRequestOperation const&) {}
+		}, entry.operation);
+
+	}
+}
+
+}
+
+OptimizedCodeTransform::OptimizedCodeTransform(
+	OptimizedCodeTransformContext& _context,
+	AbstractAssembly& _assembly,
+	BuiltinContext& _builtinContext,
+	bool _useNamedLabelsForFunctions):
+m_context(_context),
+m_assembly(_assembly),
+m_builtinContext(_builtinContext),
+m_useNamedLabelsForFunctions(_useNamedLabelsForFunctions)
 {
 
 }
@@ -67,102 +101,52 @@ void OptimizedCodeTransform::run(
 	bool _useNamedLabelsForFunctions
 )
 {
-	BasicBlock rootBlock;
-	DataFlowGraphBuilder{_analysisInfo, _dialect, rootBlock}(_block);
+	DataFlowGraph graph;
+	BasicBlock* rootBlock = &graph.blocks.emplace_back();
+	{
+		DataFlowGraphBuilder dataFlowGraphBuilder{graph, _analysisInfo, _dialect, rootBlock};
+		dataFlowGraphBuilder(_block);
+		yulAssert(dataFlowGraphBuilder.lastBlock(), "");
+		markJunk(*rootBlock, *dataFlowGraphBuilder.lastBlock());
+		for (auto&& [functionEntry, functionExit]: graph.functions | ranges::views::values)
+			markJunk(*functionEntry, *functionExit);
+	}
+
+
 
 	std::cout << std::endl << std::endl << "START CODEGEN" << std::endl << std::endl;
 
-	std::map<Scope::Function const*, AbstractAssembly::LabelID> stagedFunctions;
+	OptimizedCodeTransformContext context{
+		graph.functions,
+		{rootBlock},
+		{},
+		{}
+	};
+
+	while (!context.queuedBlocks.empty())
 	{
-		OptimizedCodeTransform transform{_assembly, _builtinContext, _useNamedLabelsForFunctions};
-		transform.visit(rootBlock);
-		_assembly.appendInstruction(evmasm::Instruction::STOP);
-		stagedFunctions = std::move(transform.m_neededFunctions);
-	}
-	std::set<Scope::Function const*> generatedFunctions;
-	while (!stagedFunctions.empty())
-	{
-		auto [function, labelId] = *stagedFunctions.begin();
-		stagedFunctions.erase(stagedFunctions.begin());
-		generatedFunctions.emplace(function);
+		BasicBlock const* block = context.queuedBlocks.front();
+		context.queuedBlocks.erase(context.queuedBlocks.begin());
+		if (context.generatedBlocks.count(block))
+			continue;
 
-		OptimizedCodeTransform transform{_assembly, _builtinContext, _useNamedLabelsForFunctions};
-		_assembly.appendLabel(labelId);
-		FunctionInfo const& info = rootBlock.functions.at(function);
-		transform.m_currentStack = info.entryLayout;
-		_assembly.setStackHeight(static_cast<int>(info.entryLayout.size()));
-		std::cout << "BEGIN FUNCTION " << function->name.str() << std::endl;
-		transform.visit(*info.body);
-		std::cout << "EXIT FUNCTION BODY OF " << function->name.str() << std::endl;
-		transform.changeCurrentStackLayout(info.exitLayout);
-		std::cout << "END FUNCTION " << function->name.str() << std::endl;
-		_assembly.appendJump(0 /* TODO: -static_cast<int>(info.exitLayout.size()) */, AbstractAssembly::JumpType::OutOfFunction);
-		_assembly.setStackHeight(0);
-
-		for (auto&& [function, labelId]: transform.m_neededFunctions)
-			if (!generatedFunctions.count(function))
-				stagedFunctions.emplace(make_pair(function, labelId));
-	}
-}
-
-void OptimizedCodeTransform::operator()(FunctionCallSlot const& _functionCall)
-{
-	AbstractAssembly::LabelID returnLabel;
-	if (Scope::Function const* function = _functionCall.function())
-	{
-		returnLabel = m_assembly.newLabelId();
-		m_assembly.appendLabelReference(returnLabel);
-		for (auto const* argument: _functionCall.arguments())
-			visit(*argument);
-		AbstractAssembly::LabelID id;
-		if (AbstractAssembly::LabelID* stagedId = util::valueOrNullptr(m_neededFunctions, function))
-			id = *stagedId;
-		else
-		{
-			id = m_useNamedLabelsForFunctions ?
-				m_assembly.namedLabel(_functionCall.call().functionName.name.str()) :
-				m_assembly.newLabelId();
-			m_neededFunctions[function] = id;
-		}
-
-		m_assembly.appendJumpTo(
-			m_neededFunctions[function],
-			static_cast<int>(function->returns.size() - function->arguments.size()) - 1,
-			AbstractAssembly::JumpType::IntoFunction
-		);
-		m_assembly.appendLabel(returnLabel);
-		popLast(_functionCall.arguments().size());
-		for(size_t i = 0; i < function->returns.size(); ++i)
-			m_currentStack.push_back(m_currentExpressionNode);
-	}
-	else
-	{
-		BuiltinFunctionForEVM const* builtin = _functionCall.builtin();
-		yulAssert(builtin, "");
-
-		size_t nonLiteralArgumentCount = 0;
-		for (auto&& [n, argument]: ranges::views::enumerate(_functionCall.arguments()))
-			if (!builtin->literalArgument(n))
-			{
-				visit(*argument);
-				++nonLiteralArgumentCount;
-			}
-
-		builtin->generateCode(_functionCall.call(), m_assembly, m_builtinContext, [](auto const&){});
-		popLast(nonLiteralArgumentCount);
-		for (size_t i = 0; i < builtin->returns.size(); ++i)
-			m_currentStack.push_back(m_currentExpressionNode);
+		OptimizedCodeTransform transform{context, _assembly, _builtinContext, _useNamedLabelsForFunctions};
+		transform.visit(*block);
 	}
 }
 
 void OptimizedCodeTransform::changeCurrentStackLayout(StackLayout const& _targetLayout)
 {
 	std::cout << "Stack shuffling:" << std::endl;
-	std::cout << "From: ";
-	PrintStackLayout(m_currentStack);
-	std::cout << "To:   ";
-	PrintStackLayout(_targetLayout);
+	std::cout << "  From: " << StackLayoutToString(m_currentStack) << std::endl;
+	std::cout << "  To:   " << StackLayoutToString(_targetLayout) << std::endl;
 
+	while(m_assembly.stackHeight() < static_cast<int>(_targetLayout.size()))
+		m_assembly.appendConstant(0);
+	while(m_assembly.stackHeight() > static_cast<int>(_targetLayout.size()))
+		m_assembly.appendInstruction(evmasm::Instruction::POP);
+	m_currentStack = _targetLayout;
+/*
 	std::vector<int> stackLayout(m_currentStack.size(), -1);
 	for(auto&& [targetPosition, targetElement]: ranges::views::enumerate(_targetLayout))
 		for(auto&& [currentPosition, currentElement]: ranges::views::enumerate(m_currentStack))
@@ -191,62 +175,109 @@ void OptimizedCodeTransform::changeCurrentStackLayout(StackLayout const& _target
 		{
 			m_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(stackLayout.size()) - static_cast<unsigned>(stackLayout.back())));
 			swap(stackLayout[static_cast<size_t>(stackLayout.back())], stackLayout.back());
-		}
-}
-
-void OptimizedCodeTransform::operator()(ExternalIdentifierSlot const&)
-{
-	yulAssert(false, "");
-}
-void OptimizedCodeTransform::operator()(LiteralSlot const& _literalNode)
-{
-	m_assembly.appendConstant(_literalNode.value());
-	m_currentStack.emplace_back(m_currentExpressionNode);
-}
-void OptimizedCodeTransform::operator()(VariableSlot const& _variable)
-{
-	Scope::Variable const& var = _variable.variable();
-	for (auto&& [depth, stackElement]: ranges::views::enumerate(m_currentStack | ranges::views::reverse))
-		if (VariableSlot const* stackVar = std::get_if<VariableSlot>(&stackElement->content))
-			if (&stackVar->variable() == &var)
-			{
-				m_assembly.appendInstruction(evmasm::dupInstruction(static_cast<unsigned>(depth + 1)));
-				m_currentStack.emplace_back(m_currentExpressionNode);
-				return;
-			}
-
-	yulAssert(false, "Variable not found on stack.");
+		}*/
 }
 
 
 void OptimizedCodeTransform::visit(BasicBlockEntry const& _basicBlock)
 {
-	if (_basicBlock.operation)
-		visit(*_basicBlock.operation);
-	std::cout << "Block transition:" << std::endl;
-	std::cout << "  From: ";
-	PrintStackLayout(m_currentStack);
-	std::cout << "  To:   ";
-	PrintStackLayout(_basicBlock.outputLayout);
-	yulAssert(m_currentStack.size() == _basicBlock.outputLayout.size(), "");
-	m_currentStack = _basicBlock.outputLayout;
-}
+	std::visit(util::GenericVisitor{
+		[&](FunctionCallOperation const& _functionCall)
+		{
+			std::cout << "FUNCTION " << _functionCall.call().functionName.name.str() << std::endl;
 
-void OptimizedCodeTransform::visit(StackSlot const& _expression)
-{
-	ScopedSaveAndRestore scopedSaveAndRestore(m_currentExpressionNode, &_expression);
-	m_assembly.setSourceLocation(_expression.location);
-	std::visit(*this, _expression.content);
+			Scope::Function const& function = _functionCall.function();
+
+			AbstractAssembly::LabelID returnLabel = m_assembly.newLabelId();
+			m_assembly.appendLabelReference(returnLabel);
+			AbstractAssembly::LabelID functionLabel;
+			BasicBlock const* functionBlock = m_context.functionBlocks.at(&function).first;
+
+			if (AbstractAssembly::LabelID* label = util::valueOrNullptr(m_context.blockLabels, functionBlock))
+				functionLabel = *label;
+			else
+			{
+				functionLabel = m_useNamedLabelsForFunctions ?
+					m_assembly.namedLabel(_functionCall.call().functionName.name.str()) :
+					m_assembly.newLabelId();
+				m_context.blockLabels[functionBlock] = functionLabel;
+				if (!m_context.generatedBlocks.count(functionBlock))
+					m_context.queuedBlocks.push_back(functionBlock);
+			}
+
+			m_assembly.appendJumpTo(
+				functionLabel,
+				static_cast<int>(function.returns.size() - function.arguments.size()) - 1,
+				AbstractAssembly::JumpType::IntoFunction
+			);
+			m_assembly.appendLabel(returnLabel);
+		},
+		[&](BuiltinCallOperation const& _builtinCallOperation)
+		{
+			std::cout << "BUILTIN " << _builtinCallOperation.call().functionName.name.str() << std::endl;
+			_builtinCallOperation.builtin().generateCode(_builtinCallOperation.call(), m_assembly, m_builtinContext, [](auto const&){});
+		},
+		[&](StackRequestOperation const&) { changeCurrentStackLayout(_basicBlock.outputLayout); }
+	}, _basicBlock.operation);
+	m_currentStack = _basicBlock.outputLayout;
 }
 
 void OptimizedCodeTransform::visit(BasicBlock const& _basicBlock)
 {
+	m_context.generatedBlocks.insert(&_basicBlock);
+	m_assembly.setStackHeight(static_cast<int>(_basicBlock.initialLayout.size()));
+	m_currentStack = _basicBlock.initialLayout;
+
+	if (AbstractAssembly::LabelID* label = util::valueOrNullptr(m_context.blockLabels, &_basicBlock))
+		m_assembly.appendLabel(*label);
+
 	std::cout << "BEGIN OF BASIC BLOCK ";
-	PrintStackLayout(m_currentStack);
+	PrintStackLayout(_basicBlock.initialLayout);
+
 	for (auto const& entry: _basicBlock.content)
 		visit(entry);
 
 	std::cout << "END OF BASIC BLOCK ";
-	PrintStackLayout(m_currentStack);
-	std::cout << "NUM EXITS: " << _basicBlock.exits.size() << std::endl;
+	changeCurrentStackLayout(_basicBlock.finalLayout);
+
+	if (_basicBlock.exits.size() > 1)
+	{
+		yulAssert(_basicBlock.exits.size() == 2, "");
+		if (AbstractAssembly::LabelID* id = util::valueOrNullptr(m_context.blockLabels, _basicBlock.exits.back()))
+			m_assembly.appendJumpToIf(*id);
+		else
+		{
+			yulAssert(!m_context.generatedBlocks.count(_basicBlock.exits.back()), "");
+			m_assembly.appendJumpToIf(m_context.blockLabels[_basicBlock.exits.back()] = m_assembly.newLabelId());
+			m_context.queuedBlocks.push_front(_basicBlock.exits.back());
+		}
+		m_currentStack.pop_back();
+	}
+
+	if (_basicBlock.isFunctionExit)
+	{
+		yulAssert(_basicBlock.exits.empty(), "");
+		yulAssert(!m_currentStack.empty(), "");
+		// TODO: yulAssert(holds_alternative<ReturnLabelSlot>(m_currentStack.back()->content), "");
+		m_assembly.appendInstruction(evmasm::Instruction::JUMP);
+	}
+	else if (_basicBlock.exits.empty())
+		m_assembly.appendInstruction(evmasm::Instruction::STOP);
+	else
+	{
+		if (AbstractAssembly::LabelID* id = util::valueOrNullptr(m_context.blockLabels, _basicBlock.exits.front()))
+			m_assembly.appendJumpTo(*id);
+		else
+		{
+			if (_basicBlock.exits.front()->entries.size() > 1)
+				m_context.blockLabels[_basicBlock.exits.front()] = m_assembly.newLabelId();
+			else
+			{
+				yulAssert(_basicBlock.exits.front()->entries.size() == 1, "");
+				yulAssert(_basicBlock.exits.front()->entries.front() == &_basicBlock, "");
+			}
+			yulAssert(!m_context.generatedBlocks.count(_basicBlock.exits.front()), "");
+			visit(*_basicBlock.exits.front());
+		}
+	}
 }
