@@ -30,183 +30,147 @@
 namespace solidity::yul
 {
 
-struct StackSlot;
-
-class ExternalIdentifierSlot
+struct DFG
 {
-public:
-	ExternalIdentifierSlot(Identifier const& _identifier): m_identifier(_identifier) {}
-	Identifier const& identifier() const { return m_identifier; }
-private:
-	Identifier const& m_identifier;
-};
-class LiteralSlot
-{
-public:
-	LiteralSlot(u256&& _value): m_value(_value) {}
-	u256 const& value() const { return m_value; }
-private:
-	u256 m_value = u256(0);
-};
-class VariableSlot
-{
-public:
-	VariableSlot(Scope::Variable const& _variable): m_variable(_variable) {}
-	Scope::Variable const& variable() const { return m_variable; }
-private:
-	Scope::Variable const& m_variable;
-};
-struct JunkSlot {};
-class IntermediateValueSlot
-{
-public:
-	IntermediateValueSlot(FunctionCall const& _funCall, size_t _index): m_call(_funCall), m_index(_index) {}
-	FunctionCall const& call() const { return m_call; }
-	size_t index() const { return m_index; }
-private:
-	FunctionCall const& m_call;
-	size_t m_index = 0;
-};
-struct ReturnLabelSlot {};
-
-struct StackSlot
-{
-public:
-	template<typename V>
-	StackSlot(V&& _v): content(std::forward<V>(_v))
+	explicit DFG() {}
+	DFG(DFG const&) = delete;
+	DFG(DFG&&) = delete;
+	DFG& operator=(DFG const&) = delete;
+	DFG& operator=(DFG&&) = delete;
+	struct Variable;
+	struct Literal;
+	struct FunctionCall;
+	struct BuiltinCall;
+	using Expression = std::variant<Variable, Literal, FunctionCall, BuiltinCall>;
+	struct Variable
 	{
-	}
-	std::variant<IntermediateValueSlot, ExternalIdentifierSlot, LiteralSlot, VariableSlot, JunkSlot, ReturnLabelSlot> content;
-	langutil::SourceLocation location;
-};
-using StackLayout = std::vector<StackSlot const*>;
+		std::shared_ptr<DebugData const> debugData;
+		Scope::Variable const* variable;
+	};
+	struct Literal
+	{
+		std::shared_ptr<DebugData const> debugData;
+		u256 value;
+	};
+	struct BuiltinCall
+	{
+		std::shared_ptr<DebugData const> debugData;
+		BuiltinFunctionForEVM const* builtin = nullptr;
+		yul::FunctionCall const* functionCall = nullptr;
+		std::vector<Expression> arguments;
+		size_t returns = 0;
+	};
+	struct FunctionCall
+	{
+		std::shared_ptr<DebugData const> debugData;
+		Scope::Function const* function = nullptr;
+		std::vector<Expression> arguments;
+		size_t returns = 0;
+	};
+	struct Declaration
+	{
+		std::shared_ptr<DebugData const> debugData;
+		std::vector<Variable> variables;
+		std::optional<Expression> value;
+	};
+	struct Assignment
+	{
+		std::shared_ptr<DebugData const> debugData;
+		std::vector<Variable> variables;
+		Expression value;
+	};
+	struct ExpressionStatement
+	{
+		std::shared_ptr<DebugData const> debugData;
+		Expression expression;
+	};
+	using Statement = std::variant<Declaration, Assignment, ExpressionStatement>;
 
-
-class FunctionCallOperation
-{
-public:
-	FunctionCallOperation(Scope::Function const& _function, FunctionCall const& _call):
-	m_function(_function), m_call(_call) {}
-
-	FunctionCall const& call() const { return m_call; }
-	Scope::Function const& function() const	{ return m_function; }
-private:
-	Scope::Function const& m_function;
-	FunctionCall const& m_call;
-};
-class BuiltinCallOperation
-{
-public:
-	BuiltinCallOperation(BuiltinFunctionForEVM const& _builtin, FunctionCall const& _call, size_t _properArgumentCount):
-	m_builtin(_builtin), m_call(_call), m_properArgumentCount(_properArgumentCount) {}
-	FunctionCall const& call() const { return m_call; }
-	BuiltinFunctionForEVM const& builtin() const { return m_builtin; }
-	size_t properArgumentCount() const { return m_properArgumentCount; }
-private:
-	BuiltinFunctionForEVM const& m_builtin;
-	FunctionCall const& m_call;
-	size_t m_properArgumentCount = 0;
-};
-class StackRequestOperation
-{
-public:
-	StackRequestOperation() {}
-};
-struct BasicBlockEntry
-{
-	BasicBlockEntry(FunctionCallOperation _operation, StackLayout _outputLayout): operation(std::move(_operation)), outputLayout(std::move(_outputLayout)) {}
-	BasicBlockEntry(BuiltinCallOperation _operation, StackLayout _outputLayout): operation(std::move(_operation)), outputLayout(std::move(_outputLayout)) {}
-	BasicBlockEntry(StackLayout _outputLayout): operation(StackRequestOperation{}), outputLayout(std::move(_outputLayout)) {}
-	BasicBlockEntry(BasicBlockEntry const&) = delete;
-	BasicBlockEntry(BasicBlockEntry&&) = delete;
-	BasicBlockEntry operator=(BasicBlockEntry const&) = delete;
-	BasicBlockEntry operator=(BasicBlockEntry&&) = delete;
-
-	std::variant<StackRequestOperation, BuiltinCallOperation, FunctionCallOperation> operation;
-	std::vector<StackSlot const*> outputLayout;
-};
-
-struct BasicBlock
-{
-	BasicBlock() {}
-	BasicBlock(BasicBlock const&) = delete;
-	BasicBlock(BasicBlock&&) = delete;
-	BasicBlock operator=(BasicBlock const&) = delete;
-	BasicBlock operator=(BasicBlock&&) = delete;
-	std::vector<BasicBlock const*> entries;
-	StackLayout initialLayout;
-	std::list<BasicBlockEntry> content;
-	StackLayout finalLayout;
-	std::vector<BasicBlock const*> exits;
-	bool isFunctionExit = false;
-};
-
-struct DataFlowGraph
-{
-	BasicBlock* root;
-	std::map<Scope::Function const*, std::pair<BasicBlock*, BasicBlock*>> functions;
-	std::list<StackSlot> stackSlots;
+	struct BasicBlock
+	{
+		std::vector<BasicBlock const*> entries;
+		std::vector<Statement> statements;
+		struct ConditionalJump
+		{
+			Expression condition;
+			BasicBlock const* nonZero = nullptr;
+			BasicBlock const* zero = nullptr;
+		};
+		struct Jump
+		{
+			BasicBlock const* target = nullptr;
+		};
+		struct FunctionReturn {};
+		struct Stop {};
+		struct Revert {};
+		std::variant<std::monostate, Jump, ConditionalJump, FunctionReturn, Stop, Revert> exit;
+	};
 	std::list<BasicBlock> blocks;
-};
+	std::vector<Scope::Variable> ghostVariables;
+	std::vector<yul::FunctionCall> ghostCalls;
 
-// Debugging only.
-std::string StackLayoutToString(StackLayout const& _layout);
+	struct FunctionInfo
+	{
+		std::shared_ptr<DebugData const> debugData;
+		BasicBlock* entry = nullptr;
+		std::set<BasicBlock*> exits;
+		std::vector<Variable> parameters;
+		std::vector<Variable> returnVariables;
+	};
+	std::map<Scope::Function const*, FunctionInfo> functions;
+	BasicBlock* entry = nullptr;
+	std::set<BasicBlock*> exits;
+
+	BasicBlock& makeBlock()
+	{
+		return blocks.emplace_back(BasicBlock{});
+	}
+};
 
 class DataFlowGraphBuilder
 {
 public:
-	DataFlowGraphBuilder(
-		DataFlowGraph& _graph,
-		AsmAnalysisInfo& _analysisInfo,
-		EVMDialect const& _dialect,
-		BasicBlock* _root
-	);
+	static std::unique_ptr<DFG> build(AsmAnalysisInfo& _analysisInfo, EVMDialect const& _dialect, Block const& _block);
 
-	void operator()(Literal const& _literal);
-	void operator()(Identifier const& _identifier);
-	void operator()(FunctionCall const&);
-	void operator()(ExpressionStatement const& _statement);
-	void operator()(Assignment const& _assignment);
+	DFG::Expression operator()(Literal const& _literal);
+	DFG::Expression operator()(Identifier const& _identifier);
+	DFG::Expression operator()(FunctionCall const&);
+
 	void operator()(VariableDeclaration const& _varDecl);
+	void operator()(Assignment const& _assignment);
+	void operator()(ExpressionStatement const& _statement);
+
+	void operator()(Block const& _block);
+
 	void operator()(If const& _if);
 	void operator()(Switch const& _switch);
-	void operator()(FunctionDefinition const&);
 	void operator()(ForLoop const&);
 	void operator()(Break const&);
 	void operator()(Continue const&);
 	void operator()(Leave const&);
-	void operator()(Block const& _block);
-	void visit(Expression const& _expression);
+	void operator()(FunctionDefinition const&);
 
-	BasicBlock* lastBlock()
-	{
-		return m_currentBasicBlock;
-	}
 private:
-	void popLast(size_t n);
-	template<typename T, typename... Args>
-	StackSlot const* makeExpression(Args&&... args)
-	{
-		yulAssert(m_currentBasicBlock, "");
-		return &m_graph.stackSlots.emplace_back(StackSlot(T(std::forward<Args>(args)...)));
-	}
-	template<typename T, typename... Args>
-	void pushExpression(Args&&... args)
-	{
-		m_currentStackLayout.emplace_back(makeExpression<T>(std::forward<Args>(args)...));
-	}
-	DataFlowGraph& m_graph;
-	AsmAnalysisInfo& m_asmAnalysisInfo;
-	EVMDialect const& m_dialect;
-	std::vector<StackSlot const*> m_currentStackLayout;
-	BasicBlock* m_currentBasicBlock = nullptr;
-	Scope* m_scope = nullptr;
-	struct ForLoopInfo { BasicBlock* postBlock = nullptr; BasicBlock* afterLoopBlock = nullptr; };
-	ForLoopInfo m_currentForLoopInfo;
-	BasicBlock* m_currentFunctionExit = nullptr;
+	DataFlowGraphBuilder(
+		DFG& _graph,
+		AsmAnalysisInfo& _analysisInfo,
+		EVMDialect const& _dialect
+	);
 
-	// debugging only
-	size_t m_currentIndent = 0;
+	Scope::Variable const& lookupVariable(YulString _name) const;
+	DFG::Expression makeExpression(Expression const& _expression);
+	std::pair<DFG::BasicBlock*, DFG::BasicBlock*> makeConditionalJump(DFG::Expression _condition);
+	void makeConditionalJump(DFG::Expression _condition, DFG::BasicBlock& _nonZero, DFG::BasicBlock& _zero);
+	void jump(DFG::BasicBlock& _target);
+	DFG& m_graph;
+	AsmAnalysisInfo& m_info;
+	EVMDialect const& m_dialect;
+	DFG::BasicBlock* m_currentBlock = nullptr;
+	Scope* m_scope = nullptr;
+	std::set<DFG::BasicBlock*> m_exits;
+	struct ForLoopInfo { DFG::BasicBlock* afterLoop = nullptr; DFG::BasicBlock* post = nullptr; };
+	std::optional<ForLoopInfo> m_forLoopInfo;
+	DFG::BasicBlock* m_currentFunctionExit = nullptr;
 };
 
 }

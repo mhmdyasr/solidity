@@ -25,58 +25,11 @@
 #include <range/v3/view/enumerate.hpp>
 #include <range/v3/view/map.hpp>
 #include <range/v3/view/reverse.hpp>
-#include <range/v3/view/take_last.hpp>
+#include <range/v3/view/take.hpp>
 
 using namespace solidity;
 using namespace solidity::yul;
 using namespace std;
-
-
-// Debugging
-namespace {
-void PrintStackLayout(StackLayout const& _layout)
-{
-	std::cout << StackLayoutToString(_layout) << std::endl;
-}
-
-void markJunk(BasicBlock&, BasicBlock& _exit)
-{
-	static StackSlot junkSlot(JunkSlot{});
-
-	std::set<Scope::Variable const*> liveVariables;
-	std::cout << "MARK AS JUNK" << std::endl;
-	for (auto const* stackSlot: _exit.finalLayout)
-		if (VariableSlot const* variable = std::get_if<VariableSlot>(&stackSlot->content))
-			liveVariables.insert(&variable->variable());
-
-	PrintStackLayout(_exit.finalLayout);
-	size_t operationArguments = 0;
-	for (BasicBlockEntry& entry: _exit.content | ranges::views::reverse)
-	{
-		for (auto const*& stackSlot: entry.outputLayout | ranges::views::drop_last(operationArguments))
-			if (VariableSlot const* variable = std::get_if<VariableSlot>(&stackSlot->content))
-				if (!liveVariables.count(&variable->variable()))
-					stackSlot = &junkSlot;
-		for (auto const*& stackSlot: entry.outputLayout | ranges::views::take_last(operationArguments))
-			if (VariableSlot const* variable = std::get_if<VariableSlot>(&stackSlot->content))
-				liveVariables.insert(&variable->variable());
-		operationArguments = 0;
-		visit(util::GenericVisitor{
-			[&](BuiltinCallOperation const& _builtinCall)
-			{
-				operationArguments = _builtinCall.properArgumentCount();
-			},
-			[&](FunctionCallOperation const& _functionCall)
-			{
-				operationArguments = _functionCall.function().arguments.size();
-			},
-			[](StackRequestOperation const&) {}
-		}, entry.operation);
-
-	}
-}
-
-}
 
 OptimizedCodeTransform::OptimizedCodeTransform(
 	OptimizedCodeTransformContext& _context,
@@ -101,183 +54,311 @@ void OptimizedCodeTransform::run(
 	bool _useNamedLabelsForFunctions
 )
 {
-	DataFlowGraph graph;
-	BasicBlock* rootBlock = &graph.blocks.emplace_back();
-	{
-		DataFlowGraphBuilder dataFlowGraphBuilder{graph, _analysisInfo, _dialect, rootBlock};
-		dataFlowGraphBuilder(_block);
-		yulAssert(dataFlowGraphBuilder.lastBlock(), "");
-		markJunk(*rootBlock, *dataFlowGraphBuilder.lastBlock());
-		for (auto&& [functionEntry, functionExit]: graph.functions | ranges::views::values)
-			markJunk(*functionEntry, *functionExit);
-	}
-
-
-
-	std::cout << std::endl << std::endl << "START CODEGEN" << std::endl << std::endl;
-
 	OptimizedCodeTransformContext context{
-		graph.functions,
-		{rootBlock},
+		DataFlowGraphBuilder::build(_analysisInfo, _dialect, _block),
+		{},
+		{},
 		{},
 		{}
 	};
-
-	while (!context.queuedBlocks.empty())
 	{
-		BasicBlock const* block = context.queuedBlocks.front();
-		context.queuedBlocks.erase(context.queuedBlocks.begin());
-		if (context.generatedBlocks.count(block))
-			continue;
+		OptimizedCodeTransform codeTransform{
+			context,
+			_assembly,
+			_builtinContext,
+			_useNamedLabelsForFunctions
+		};
+		codeTransform(*context.dfg->entry);
+		_assembly.appendInstruction(evmasm::Instruction::STOP);
+	}
+	while (!context.stagedFunctions.empty())
+	{
+		Scope::Function const* function = *context.stagedFunctions.begin();
+		context.stagedFunctions.pop_front();
 
-		OptimizedCodeTransform transform{context, _assembly, _builtinContext, _useNamedLabelsForFunctions};
-		transform.visit(*block);
+		DFG::FunctionInfo const& info = context.dfg->functions.at(function);
+		OptimizedCodeTransform codeTransform{
+			context,
+			_assembly,
+			_builtinContext,
+			_useNamedLabelsForFunctions
+		};
+		_assembly.setStackHeight(1 + static_cast<int>(info.parameters.size()));
+		_assembly.setSourceLocation(locationOf(info));
+		_assembly.appendLabel(context.functionEntries.at(function));
+		codeTransform.m_stack.emplace_back(ReturnLabelSlot{});
+		codeTransform.m_stack += info.parameters | ranges::views::transform([](DFG::Variable const& _var) -> StackSlot {
+			return VariableSlot{&_var};
+		});
+		codeTransform.m_unallocatedReturnVariables += info.returnVariables | ranges::views::transform([](DFG::Variable const& _var) {
+			return _var.variable;
+		});
+		codeTransform(*info.entry);
+		for (auto const& returnVar: info.returnVariables) // TODO: order?
+			if (codeTransform.m_unallocatedReturnVariables.count(returnVar.variable))
+			{
+				_assembly.appendConstant(0);
+				codeTransform.m_stack.emplace_back(VariableSlot{&returnVar});
+			}
+		std::cout << "LAYOUT BEFORE: " << stackToString(codeTransform.m_stack) << std::endl;
+		vector<StackSlot> exitLayout = info.returnVariables | ranges::views::transform([](DFG::Variable const& _var) {
+			return VariableSlot{&_var};
+		}) | ranges::to<vector<StackSlot>>;
+		exitLayout.emplace_back(ReturnLabelSlot{});
+		codeTransform.shuffleStackTo(exitLayout);
+		std::cout << "LAYOUT AFTER: " << stackToString(codeTransform.m_stack) << std::endl;
+		_assembly.appendJump(-static_cast<int>(info.returnVariables.size()), AbstractAssembly::JumpType::OutOfFunction);
 	}
 }
 
-void OptimizedCodeTransform::changeCurrentStackLayout(StackLayout const& _targetLayout)
+void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
 {
-	std::cout << "Stack shuffling:" << std::endl;
-	std::cout << "  From: " << StackLayoutToString(m_currentStack) << std::endl;
-	std::cout << "  To:   " << StackLayoutToString(_targetLayout) << std::endl;
+	for(DFG::Statement const& statement: _block.statements)
+		std::visit(*this, statement);
 
-	while(m_assembly.stackHeight() < static_cast<int>(_targetLayout.size()))
-		m_assembly.appendConstant(0);
-	while(m_assembly.stackHeight() > static_cast<int>(_targetLayout.size()))
-		m_assembly.appendInstruction(evmasm::Instruction::POP);
-	m_currentStack = _targetLayout;
-/*
-	std::vector<int> stackLayout(m_currentStack.size(), -1);
-	for(auto&& [targetPosition, targetElement]: ranges::views::enumerate(_targetLayout))
-		for(auto&& [currentPosition, currentElement]: ranges::views::enumerate(m_currentStack))
-			if (std::visit(util::GenericVisitor{
-				[&](ReturnLabelSlot const&, ReturnLabelSlot const&) { return true; },
-				[&](VariableSlot const& a, VariableSlot const& b)
-				{
-					return &a.variable() == &b.variable();
-				},
-				[](auto const&, auto const&) { return false; }
-			}, targetElement->content, currentElement->content))
-				stackLayout[currentPosition] = static_cast<int>(targetPosition);
+	auto jump = [&](DFG::BasicBlock const* _target) {
+		yulAssert(_target, "");
+		yulAssert(_target->entries.size() >= 1, "");
 
-	for (auto l: stackLayout)
-		std::cout << l << " ";
-	std::cout << std::endl;
-
-	// TODO: better shuffling
-	while (!stackLayout.empty() && stackLayout.back() != static_cast<int>(stackLayout.size() - 1))
-		if (stackLayout.back() < 0)
-		{
-			m_assembly.appendInstruction(evmasm::Instruction::POP);
-			stackLayout.pop_back();
-		}
+		if (auto const* label = util::valueOrNullptr(m_jumpLabels, _target))
+			m_assembly.appendJumpTo(*label, 0);
 		else
 		{
-			m_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(stackLayout.size()) - static_cast<unsigned>(stackLayout.back())));
-			swap(stackLayout[static_cast<size_t>(stackLayout.back())], stackLayout.back());
-		}*/
-}
-
-
-void OptimizedCodeTransform::visit(BasicBlockEntry const& _basicBlock)
-{
+			if (_target->entries.size() > 1)
+				m_assembly.appendLabel(m_jumpLabels[_target] = m_assembly.newLabelId());
+			(*this)(*_target);
+		}
+	};
 	std::visit(util::GenericVisitor{
-		[&](FunctionCallOperation const& _functionCall)
+		[](std::monostate) { std::cout << "MONOSTATE EXIT" << std::endl; },
+		[&](DFG::BasicBlock::Jump const& _jump)
 		{
-			std::cout << "FUNCTION " << _functionCall.call().functionName.name.str() << std::endl;
-
-			Scope::Function const& function = _functionCall.function();
-
-			AbstractAssembly::LabelID returnLabel = m_assembly.newLabelId();
-			m_assembly.appendLabelReference(returnLabel);
-			AbstractAssembly::LabelID functionLabel;
-			BasicBlock const* functionBlock = m_context.functionBlocks.at(&function).first;
-
-			if (AbstractAssembly::LabelID* label = util::valueOrNullptr(m_context.blockLabels, functionBlock))
-				functionLabel = *label;
+			std::cout << "JUMP EXIT" << std::endl;
+			jump(_jump.target);
+		},
+		[&](DFG::BasicBlock::ConditionalJump const& _conditonalJump)
+		{
+			std::visit(*this, _conditonalJump.condition);
+			if (auto const* label = util::valueOrNullptr(m_jumpLabels, _conditonalJump.nonZero))
+				m_assembly.appendJumpToIf(*label);
 			else
 			{
-				functionLabel = m_useNamedLabelsForFunctions ?
-					m_assembly.namedLabel(_functionCall.call().functionName.name.str()) :
-					m_assembly.newLabelId();
-				m_context.blockLabels[functionBlock] = functionLabel;
-				if (!m_context.generatedBlocks.count(functionBlock))
-					m_context.queuedBlocks.push_back(functionBlock);
+				m_assembly.appendJumpToIf(m_jumpLabels[_conditonalJump.nonZero] = m_assembly.newLabelId());
 			}
 
-			m_assembly.appendJumpTo(
-				functionLabel,
-				static_cast<int>(function.returns.size() - function.arguments.size()) - 1,
-				AbstractAssembly::JumpType::IntoFunction
-			);
-			m_assembly.appendLabel(returnLabel);
+			std::cout << "CONDITIONAL JUMP EXIT" << std::endl;
 		},
-		[&](BuiltinCallOperation const& _builtinCallOperation)
-		{
-			std::cout << "BUILTIN " << _builtinCallOperation.call().functionName.name.str() << std::endl;
-			_builtinCallOperation.builtin().generateCode(_builtinCallOperation.call(), m_assembly, m_builtinContext, [](auto const&){});
-		},
-		[&](StackRequestOperation const&) { changeCurrentStackLayout(_basicBlock.outputLayout); }
-	}, _basicBlock.operation);
-	m_currentStack = _basicBlock.outputLayout;
+		[](DFG::BasicBlock::FunctionReturn const&) { std::cout << "FUNCTION RETURN EXIT" << std::endl; },
+		[](DFG::BasicBlock::Stop const&) { std::cout << "STOP EXIT" << std::endl; },
+		[](DFG::BasicBlock::Revert const&) { std::cout << "REVERT EXIT" << std::endl; }
+	}, _block.exit);
+	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
 }
 
-void OptimizedCodeTransform::visit(BasicBlock const& _basicBlock)
+void OptimizedCodeTransform::operator()(DFG::Declaration const& _declaration)
 {
-	m_context.generatedBlocks.insert(&_basicBlock);
-	m_assembly.setStackHeight(static_cast<int>(_basicBlock.initialLayout.size()));
-	m_currentStack = _basicBlock.initialLayout;
+	m_assembly.setSourceLocation(locationOf(_declaration));
 
-	if (AbstractAssembly::LabelID* label = util::valueOrNullptr(m_context.blockLabels, &_basicBlock))
-		m_assembly.appendLabel(*label);
-
-	std::cout << "BEGIN OF BASIC BLOCK ";
-	PrintStackLayout(_basicBlock.initialLayout);
-
-	for (auto const& entry: _basicBlock.content)
-		visit(entry);
-
-	std::cout << "END OF BASIC BLOCK ";
-	changeCurrentStackLayout(_basicBlock.finalLayout);
-
-	if (_basicBlock.exits.size() > 1)
-	{
-		yulAssert(_basicBlock.exits.size() == 2, "");
-		if (AbstractAssembly::LabelID* id = util::valueOrNullptr(m_context.blockLabels, _basicBlock.exits.back()))
-			m_assembly.appendJumpToIf(*id);
-		else
-		{
-			yulAssert(!m_context.generatedBlocks.count(_basicBlock.exits.back()), "");
-			m_assembly.appendJumpToIf(m_context.blockLabels[_basicBlock.exits.back()] = m_assembly.newLabelId());
-			m_context.queuedBlocks.push_front(_basicBlock.exits.back());
-		}
-		m_currentStack.pop_back();
-	}
-
-	if (_basicBlock.isFunctionExit)
-	{
-		yulAssert(_basicBlock.exits.empty(), "");
-		yulAssert(!m_currentStack.empty(), "");
-		// TODO: yulAssert(holds_alternative<ReturnLabelSlot>(m_currentStack.back()->content), "");
-		m_assembly.appendInstruction(evmasm::Instruction::JUMP);
-	}
-	else if (_basicBlock.exits.empty())
-		m_assembly.appendInstruction(evmasm::Instruction::STOP);
+	if (_declaration.value)
+		std::visit(*this, *_declaration.value);
 	else
-	{
-		if (AbstractAssembly::LabelID* id = util::valueOrNullptr(m_context.blockLabels, _basicBlock.exits.front()))
-			m_assembly.appendJumpTo(*id);
-		else
+		for (size_t i = 0; i < _declaration.variables.size(); ++i)
 		{
-			if (_basicBlock.exits.front()->entries.size() > 1)
-				m_context.blockLabels[_basicBlock.exits.front()] = m_assembly.newLabelId();
-			else
+			m_assembly.appendConstant(0);
+			m_stack.emplace_back(LiteralSlot{0});
+		}
+
+	pop(_declaration.variables.size());
+	for (auto const& var: _declaration.variables)
+		m_stack.emplace_back(VariableSlot{&var});
+
+	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
+}
+
+void OptimizedCodeTransform::operator()(DFG::Assignment const& _assignment)
+{
+	m_assembly.setSourceLocation(locationOf(_assignment));
+	for(DFG::Variable const& var: _assignment.variables | ranges::views::reverse)
+		if (m_unallocatedReturnVariables.count(var.variable))
+		{
+			m_assembly.appendConstant(0);
+			m_stack.push_back(VariableSlot{&var});
+			m_unallocatedReturnVariables.erase(var.variable);
+		}
+
+	std::cout << " before assign: " << stackToString(m_stack) << std::endl;
+
+	std::visit(*this, _assignment.value);
+	for(DFG::Variable const& var: _assignment.variables | ranges::views::reverse)
+	{
+		m_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(variableStackDepth(var))));
+		m_assembly.appendInstruction(evmasm::Instruction::POP);
+		m_stack.pop_back();
+	}
+
+	std::cout << " after assign: " << stackToString(m_stack) << std::endl;
+	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
+}
+
+void OptimizedCodeTransform::operator()(DFG::ExpressionStatement const& _stmt)
+{
+	m_assembly.setSourceLocation(locationOf(_stmt));
+	std::visit(util::GenericVisitor{
+		[&](DFG::FunctionCall const& _call) {
+			size_t stackHeightBefore = m_stack.size();
+			(*this)(_call);
+			yulAssert(stackHeightBefore == m_stack.size(), "");
+		},
+		[&](DFG::BuiltinCall const& _call) {
+			yulAssert(_call.returns == 0, "");
+			size_t stackHeightBefore = m_stack.size();
+			(*this)(_call);
+			yulAssert(stackHeightBefore == m_stack.size(), "");
+		},
+		[&](auto const&) { yulAssert(false, "Expected function or builtin call."); }
+	}, _stmt.expression);
+	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
+}
+
+void OptimizedCodeTransform::operator()(DFG::BuiltinCall const& _builtinCall)
+{
+	m_assembly.setSourceLocation(locationOf(_builtinCall));
+
+	for(auto const& argument: _builtinCall.arguments | ranges::views::reverse)
+		std::visit(*this, argument);
+
+	std::cout << _builtinCall.functionCall->functionName.name.str() << "  " << stackToString(m_stack) << std::endl;
+
+	_builtinCall.builtin->generateCode(*_builtinCall.functionCall, m_assembly, m_builtinContext, [](auto&&){});
+	pop(_builtinCall.arguments.size());
+	for (size_t i = 0; i < _builtinCall.builtin->returns.size(); ++i)
+		m_stack.emplace_back(TemporarySlot{&_builtinCall, i});
+
+	std::cout << "  => " << stackToString(m_stack) << std::endl;
+	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
+}
+
+void OptimizedCodeTransform::operator()(DFG::FunctionCall const& _functionCall)
+{
+	m_assembly.setSourceLocation(locationOf(_functionCall));
+	AbstractAssembly::LabelID label = m_assembly.newLabelId();
+	m_assembly.appendLabelReference(label);
+	m_stack.emplace_back(ReturnLabelSlot{&_functionCall});
+
+	for(auto const& argument: _functionCall.arguments | ranges::views::reverse)
+		std::visit(*this, argument);
+
+	std::cout << _functionCall.function->name.str() << "  " << stackToString(m_stack) << std::endl;
+
+	m_assembly.appendJumpTo(
+		getFunctionLabel(*_functionCall.function),
+		static_cast<int>(_functionCall.function->returns.size() - _functionCall.function->arguments.size()) - 1,
+		AbstractAssembly::JumpType::IntoFunction
+	);
+	m_assembly.appendLabel(label);
+	pop(_functionCall.arguments.size() + 1);
+	for (size_t i = 0; i < _functionCall.function->returns.size(); ++i)
+		m_stack.emplace_back(TemporarySlot{&_functionCall, i});
+
+	std::cout << "  => " << stackToString(m_stack) << std::endl;
+	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
+}
+
+void OptimizedCodeTransform::operator()(DFG::Literal const& _literal)
+{
+	m_assembly.setSourceLocation(locationOf(_literal));
+	m_assembly.appendConstant(_literal.value);
+	m_stack.emplace_back(LiteralSlot{_literal.value});
+	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
+}
+
+void OptimizedCodeTransform::operator()(DFG::Variable const& _variable)
+{
+	m_assembly.setSourceLocation(locationOf(_variable));
+	size_t depth = variableStackDepth(_variable);
+	m_assembly.appendInstruction(evmasm::dupInstruction(static_cast<unsigned>(depth + 1)));
+	m_stack.emplace_back(VariableSlot{&_variable});
+	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
+}
+
+AbstractAssembly::LabelID OptimizedCodeTransform::getFunctionLabel(Scope::Function const& _function)
+{
+	if (auto const* entry = util::valueOrNullptr(m_context.functionEntries, &_function))
+		return *entry;
+	AbstractAssembly::LabelID entry = m_context.functionEntries[&_function] = m_useNamedLabelsForFunctions ?
+		m_assembly.namedLabel(_function.name.str(), _function.arguments.size(), _function.returns.size(), {}) :
+		m_assembly.newLabelId();
+	m_context.stagedFunctions.emplace_back(&_function);
+	return entry;
+}
+
+size_t OptimizedCodeTransform::variableStackDepth(DFG::Variable const& _var)
+{
+	for (auto&& [depth, stackSlot]: (m_stack | ranges::views::reverse) | ranges::views::enumerate)
+		if (VariableSlot* varSlot = get_if<VariableSlot>(&stackSlot))
+			if (varSlot->variable->variable == _var.variable)
+				return depth;
+	yulAssert(false, "Variable not found on stack.");
+}
+
+void OptimizedCodeTransform::shuffleStackTo(std::vector<StackSlot> const& _target)
+{
+	auto matches = util::GenericVisitor{
+		[](ReturnLabelSlot const& _r1, ReturnLabelSlot const& _r2) {
+			return _r1.call == _r2.call;
+		},
+		[](VariableSlot const& _v1, VariableSlot const& _v2) {
+			return _v1.variable->variable == _v2.variable->variable;
+		},
+		[](auto const&, auto const&) { return false; }
+	};
+	auto findSlot = [&](StackSlot const& _target) -> size_t {
+		for (auto&& [depth, slot]: ranges::views::enumerate(m_stack | ranges::views::reverse))
+			if (std::visit(matches, _target, slot))
+				return depth;
+		yulAssert(false, "Slot not found on stack.");
+	};
+
+	yulAssert(m_stack.size() >= _target.size(), "");
+	for (auto&& [idx, slots]: ranges::zip_view(m_stack | ranges::views::take(_target.size()), _target) | ranges::views::enumerate)
+	{
+		size_t targetDepth = m_stack.size() - idx - 1;
+		auto&& [currentSlot, targetSlot] = slots;
+
+		if (!std::visit(matches, currentSlot, targetSlot))
+		{
+			size_t sourceDepth = findSlot(targetSlot);
+			if (sourceDepth > 0)
 			{
-				yulAssert(_basicBlock.exits.front()->entries.size() == 1, "");
-				yulAssert(_basicBlock.exits.front()->entries.front() == &_basicBlock, "");
+				std::swap(m_stack.back(), m_stack[m_stack.size() - sourceDepth - 1]);
+				m_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(sourceDepth)));
 			}
-			yulAssert(!m_context.generatedBlocks.count(_basicBlock.exits.front()), "");
-			visit(*_basicBlock.exits.front());
+			if (targetDepth > 0)
+			{
+				std::swap(m_stack.back(), m_stack[m_stack.size() - targetDepth - 1]);
+				m_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(targetDepth)));
+			}
 		}
 	}
+	pop(m_stack.size() - _target.size(), false);
+	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
+}
+
+string OptimizedCodeTransform::stackSlotToString(StackSlot const& _slot)
+{
+	return std::visit(util::GenericVisitor{
+		[](ReturnLabelSlot const&) -> string { return "RET"; },
+		[](VariableSlot const& _var) { return _var.variable->variable->name.str() + "(" + to_string(intptr_t(_var.variable->variable)) + ")"; },
+		[](LiteralSlot const& _lit) { return util::toCompactHexWithPrefix(_lit.value); },
+		[](TemporarySlot const&) -> string { return "TMP"; }
+	}, _slot);
+}
+
+string OptimizedCodeTransform::stackToString(vector<StackSlot> const& _stack)
+{
+	string result("[ ");
+	for (auto const& slot: _stack)
+		result += stackSlotToString(slot) + ' ';
+	result += ']';
+	return result;
 }

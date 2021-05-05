@@ -40,12 +40,19 @@ namespace solidity::yul
 {
 struct AsmAnalysisInfo;
 
+struct ReturnLabelSlot { DFG::FunctionCall const* call = nullptr; };
+struct VariableSlot { DFG::Variable const* variable = nullptr; };
+struct LiteralSlot { u256 value; };
+struct TemporarySlot { std::variant<DFG::FunctionCall const*, DFG::BuiltinCall const*> call; size_t idx; };
+using StackSlot = std::variant<ReturnLabelSlot, VariableSlot, LiteralSlot, TemporarySlot>;
+
 struct OptimizedCodeTransformContext
 {
-	std::map<Scope::Function const*, std::pair<BasicBlock*, BasicBlock*>> const& functionBlocks;
-	std::list<BasicBlock const*> queuedBlocks;
-	std::map<BasicBlock const*, AbstractAssembly::LabelID> blockLabels;
-	std::set<BasicBlock const*> generatedBlocks;
+	std::unique_ptr<DFG> dfg;
+	std::map<Scope::Function const*, AbstractAssembly::LabelID> functionEntries;
+	std::list<Scope::Function const*> stagedFunctions;
+	std::map<DFG::BasicBlock const*, AbstractAssembly::LabelID> blockLabels;
+	std::list<std::pair<DFG::BasicBlock const*, std::vector<StackSlot>>> stagedBlocks;
 };
 
 class OptimizedCodeTransform
@@ -60,27 +67,53 @@ public:
 		ExternalIdentifierAccess const& _identifierAccess = ExternalIdentifierAccess(),
 		bool _useNamedLabelsForFunctions = false
 	);
+
+	void operator()(DFG::BasicBlock const& _block);
+	void operator()(DFG::Declaration const& _declaration);
+	void operator()(DFG::Assignment const& _assignment);
+	void operator()(DFG::ExpressionStatement const& _expression);
+
+	void operator()(DFG::BuiltinCall const& _builtinCall);
+	void operator()(DFG::FunctionCall const& _functionCall);
+	void operator()(DFG::Literal const& _literal);
+	void operator()(DFG::Variable const& _variable);
+
 private:
 	OptimizedCodeTransform(OptimizedCodeTransformContext& _context, AbstractAssembly& _assembly, BuiltinContext& _builtinContext, bool _useNamedLabelsForFunctions);
 
-	void visit(BasicBlock const& _basicBlock);
-	void visit(BasicBlockEntry const& _basicBlock);
+	void visit(DFG::BasicBlock const& _block);
 
-	void changeCurrentStackLayout(StackLayout const& _targetLayout);
+	AbstractAssembly::LabelID getFunctionLabel(Scope::Function const& _function);
+
+	size_t variableStackDepth(DFG::Variable const& _var);
 
 	OptimizedCodeTransformContext& m_context;
 	AbstractAssembly& m_assembly;
 	BuiltinContext& m_builtinContext;
 	bool const m_useNamedLabelsForFunctions = true;
-	std::vector<StackSlot const*> m_currentStack;
 
+	std::vector<StackSlot> m_stack;
+	std::set<Scope::Variable const*> m_unallocatedReturnVariables;
 
-	std::optional<AbstractAssembly::LabelID> m_currentFunctionExit;
-	void popLast(size_t n)
+	std::map<DFG::BasicBlock const*, AbstractAssembly::LabelID> m_jumpLabels;
+	std::list<std::pair<DFG::BasicBlock const*, std::vector<StackSlot>>> m_stagedBlocks;
+
+	void pop(size_t _amount = 1, bool _onlyStack = true)
 	{
-		while (n--)
-			m_currentStack.pop_back();
+		yulAssert(m_stack.size() >= _amount, "");
+		while (_amount--)
+		{
+			m_stack.pop_back();
+			if (!_onlyStack)
+				m_assembly.appendInstruction(evmasm::Instruction::POP);
+		}
 	}
+
+	void shuffleStackTo(std::vector<StackSlot> const& _target);
+
+	// Debugging.
+	static std::string stackSlotToString(StackSlot const& _slot);
+	static std::string stackToString(std::vector<StackSlot> const& _stack);
 };
 
 }
