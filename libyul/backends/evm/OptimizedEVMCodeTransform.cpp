@@ -320,6 +320,7 @@ void OptimizedCodeTransform::shuffleStackTo(std::vector<StackSlot> const& _targe
 	};
 
 	yulAssert(m_stack.size() >= _target.size(), "");
+	// TODO: take into account that we might be able to pop the top early.
 	for (auto&& [idx, slots]: ranges::zip_view(m_stack | ranges::views::take(_target.size()), _target) | ranges::views::enumerate)
 	{
 		size_t targetDepth = m_stack.size() - idx - 1;
@@ -340,7 +341,7 @@ void OptimizedCodeTransform::shuffleStackTo(std::vector<StackSlot> const& _targe
 			}
 		}
 	}
-	pop(m_stack.size() - _target.size(), false);
+	pop(m_stack.size() - _target.size(), true);
 	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
 }
 

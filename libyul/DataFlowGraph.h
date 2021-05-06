@@ -158,7 +158,6 @@ private:
 	);
 
 	Scope::Variable const& lookupVariable(YulString _name) const;
-	DFG::Expression makeExpression(Expression const& _expression);
 	std::pair<DFG::BasicBlock*, DFG::BasicBlock*> makeConditionalJump(DFG::Expression _condition);
 	void makeConditionalJump(DFG::Expression _condition, DFG::BasicBlock& _nonZero, DFG::BasicBlock& _zero);
 	void jump(DFG::BasicBlock& _target);

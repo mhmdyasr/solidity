@@ -66,18 +66,12 @@ m_dialect(_dialect)
 
 DFG::Expression DataFlowGraphBuilder::operator()(Literal const& _literal)
 {
-	return DFG::Literal{
-		_literal.debugData,
-		valueOfLiteral(_literal)
-	};
+	return DFG::Literal{_literal.debugData, valueOfLiteral(_literal) };
 }
 
 DFG::Expression DataFlowGraphBuilder::operator()(Identifier const& _identifier)
 {
-	return DFG::Variable{
-		_identifier.debugData,
-		&lookupVariable(_identifier.name)
-	};
+	return DFG::Variable{_identifier.debugData, &lookupVariable(_identifier.name)};
 }
 
 DFG::Expression DataFlowGraphBuilder::operator()(FunctionCall const& _call)
@@ -155,7 +149,6 @@ void DataFlowGraphBuilder::operator()(ExpressionStatement const& _exprStmt)
 void DataFlowGraphBuilder::operator()(Block const& _block)
 {
 	ScopedSaveAndRestore saveScope(m_scope, m_info.scopes.at(&_block).get());
-
 	for(auto const& statement: _block.statements)
 		std::visit(*this, statement);
 }
@@ -181,6 +174,7 @@ void DataFlowGraphBuilder::makeConditionalJump(DFG::Expression _condition, DFG::
 }
 void DataFlowGraphBuilder::jump(DFG::BasicBlock& _target)
 {
+	yulAssert(m_currentBlock, "");
 	m_currentBlock->exit = DFG::BasicBlock::Jump{&_target};
 	_target.entries.emplace_back(m_currentBlock);
 	m_currentBlock = &_target;
@@ -195,6 +189,7 @@ void DataFlowGraphBuilder::operator()(If const& _if)
 
 void DataFlowGraphBuilder::operator()(Switch const& _switch)
 {
+	yulAssert(m_currentBlock, "");
 	size_t ghostVariableId = m_graph.ghostVariables.size();
 	DFG::Variable ghostVariable{_switch.debugData, &m_graph.ghostVariables.emplace_back(
 		Scope::Variable{""_yulstring, YulString("GHOST[" + to_string(ghostVariableId) + "]")}

@@ -98,13 +98,13 @@ private:
 	std::map<DFG::BasicBlock const*, AbstractAssembly::LabelID> m_jumpLabels;
 	std::list<std::pair<DFG::BasicBlock const*, std::vector<StackSlot>>> m_stagedBlocks;
 
-	void pop(size_t _amount = 1, bool _onlyStack = true)
+	void pop(size_t _amount = 1, bool _generateCode = false)
 	{
 		yulAssert(m_stack.size() >= _amount, "");
 		while (_amount--)
 		{
 			m_stack.pop_back();
-			if (!_onlyStack)
+			if (_generateCode)
 				m_assembly.appendInstruction(evmasm::Instruction::POP);
 		}
 	}
