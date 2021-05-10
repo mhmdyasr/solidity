@@ -19,6 +19,7 @@
 #include <libyul/backends/evm/OptimizedEVMCodeTransform.h>
 #include <libyul/DataFlowGraph.h>
 
+#include <libsolutil/Permutations.h>
 #include <libsolutil/Visitor.h>
 
 #include <range/v3/view/drop_last.hpp>
@@ -93,6 +94,7 @@ void OptimizedCodeTransform::run(
 		codeTransform.m_unallocatedReturnVariables += info.returnVariables | ranges::views::transform([](DFG::Variable const& _var) {
 			return _var.variable;
 		});
+		std::cout << "[function " << function->name.str() << "]" << std::endl;
 		codeTransform(*info.entry);
 		for (auto const& returnVar: info.returnVariables) // TODO: order?
 			if (codeTransform.m_unallocatedReturnVariables.count(returnVar.variable))
@@ -107,15 +109,20 @@ void OptimizedCodeTransform::run(
 		exitLayout.emplace_back(ReturnLabelSlot{});
 		codeTransform.shuffleStackTo(exitLayout);
 		std::cout << "LAYOUT AFTER: " << stackToString(codeTransform.m_stack) << std::endl;
+		std::cout << "[end function " << function->name.str() << "]" << std::endl;
 		_assembly.appendJump(-static_cast<int>(info.returnVariables.size()), AbstractAssembly::JumpType::OutOfFunction);
 	}
 }
 
 void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
 {
+	yulAssert(_block.stackLayout.has_value(), "");
+	std::cout << "ENTRY LAYOUT: " << stackToString(_block.stackLayout->entry) << std::endl;
+	shuffleStackTo(_block.stackLayout->entry);
 	for(DFG::Statement const& statement: _block.statements)
 		std::visit(*this, statement);
 
+	std::cout << "EXIT LAYOUT: " << stackToString(_block.stackLayout->exit) << std::endl;
 	auto jump = [&](DFG::BasicBlock const* _target) {
 		yulAssert(_target, "");
 		yulAssert(_target->entries.size() >= 1, "");
@@ -172,26 +179,32 @@ void OptimizedCodeTransform::operator()(DFG::Declaration const& _declaration)
 	for (auto const& var: _declaration.variables)
 		m_stack.emplace_back(VariableSlot{&var});
 
+	std::cout << "Current: " << stackToString(m_stack) << std::endl;
+	std::cout << "Target: " << stackToString(*_declaration.targetLayout) << std::endl;
+	shuffleStackTo(*_declaration.targetLayout);
+
 	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
 }
 
 void OptimizedCodeTransform::operator()(DFG::Assignment const& _assignment)
 {
 	m_assembly.setSourceLocation(locationOf(_assignment));
-	for(DFG::Variable const& var: _assignment.variables | ranges::views::reverse)
+	/*for(DFG::Variable const& var: _assignment.variables | ranges::views::reverse)
 		if (m_unallocatedReturnVariables.count(var.variable))
 		{
 			m_assembly.appendConstant(0);
 			m_stack.push_back(VariableSlot{&var});
 			m_unallocatedReturnVariables.erase(var.variable);
-		}
+		}*/
 
 	std::cout << " before assign: " << stackToString(m_stack) << std::endl;
 
 	std::visit(*this, _assignment.value);
 	for(DFG::Variable const& var: _assignment.variables | ranges::views::reverse)
 	{
-		m_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(variableStackDepth(var))));
+		auto depth = variableStackDepth(var);
+		if (depth)
+			m_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(*depth)));
 		m_assembly.appendInstruction(evmasm::Instruction::POP);
 		m_stack.pop_back();
 	}
@@ -275,8 +288,9 @@ void OptimizedCodeTransform::operator()(DFG::Literal const& _literal)
 void OptimizedCodeTransform::operator()(DFG::Variable const& _variable)
 {
 	m_assembly.setSourceLocation(locationOf(_variable));
-	size_t depth = variableStackDepth(_variable);
-	m_assembly.appendInstruction(evmasm::dupInstruction(static_cast<unsigned>(depth + 1)));
+	optional<size_t> depth = variableStackDepth(_variable);
+	yulAssert(depth, "Variable not found on stack.");
+	m_assembly.appendInstruction(evmasm::dupInstruction(static_cast<unsigned>(*depth + 1)));
 	m_stack.emplace_back(VariableSlot{&_variable});
 	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
 }
@@ -292,17 +306,19 @@ AbstractAssembly::LabelID OptimizedCodeTransform::getFunctionLabel(Scope::Functi
 	return entry;
 }
 
-size_t OptimizedCodeTransform::variableStackDepth(DFG::Variable const& _var)
+optional<size_t> OptimizedCodeTransform::variableStackDepth(DFG::Variable const& _var)
 {
 	for (auto&& [depth, stackSlot]: (m_stack | ranges::views::reverse) | ranges::views::enumerate)
 		if (VariableSlot* varSlot = get_if<VariableSlot>(&stackSlot))
 			if (varSlot->variable->variable == _var.variable)
 				return depth;
-	yulAssert(false, "Variable not found on stack.");
+	return nullopt;
 }
 
 void OptimizedCodeTransform::shuffleStackTo(std::vector<StackSlot> const& _target)
 {
+	std::cout << "SHUFFLE " << stackToString(m_stack) << std::endl;
+	std::cout << "     TO " << stackToString(_target) << std::endl;
 	auto matches = util::GenericVisitor{
 		[](ReturnLabelSlot const& _r1, ReturnLabelSlot const& _r2) {
 			return _r1.call == _r2.call;
@@ -310,38 +326,68 @@ void OptimizedCodeTransform::shuffleStackTo(std::vector<StackSlot> const& _targe
 		[](VariableSlot const& _v1, VariableSlot const& _v2) {
 			return _v1.variable->variable == _v2.variable->variable;
 		},
+		[](LiteralSlot const& _l1, LiteralSlot const& _l2) {
+			return _l1.value == _l2.value;
+		},
 		[](auto const&, auto const&) { return false; }
 	};
-	auto findSlot = [&](StackSlot const& _target) -> size_t {
-		for (auto&& [depth, slot]: ranges::views::enumerate(m_stack | ranges::views::reverse))
+	auto findSlot = [&](StackSlot const& _target) -> optional<size_t> {
+		for (auto&& [pos, slot]: ranges::views::enumerate(m_stack))
 			if (std::visit(matches, _target, slot))
-				return depth;
-		yulAssert(false, "Slot not found on stack.");
+				return pos;
+		return nullopt;
 	};
 
-	yulAssert(m_stack.size() >= _target.size(), "");
-	// TODO: take into account that we might be able to pop the top early.
-	for (auto&& [idx, slots]: ranges::zip_view(m_stack | ranges::views::take(_target.size()), _target) | ranges::views::enumerate)
+	std::vector<int> targetPositions(m_stack.size(), -1);
 	{
-		size_t targetDepth = m_stack.size() - idx - 1;
-		auto&& [currentSlot, targetSlot] = slots;
-
-		if (!std::visit(matches, currentSlot, targetSlot))
-		{
-			size_t sourceDepth = findSlot(targetSlot);
-			if (sourceDepth > 0)
+		std::vector<int> added;
+		for (auto&& [targetPosition, slot]: (_target | ranges::views::enumerate) | ranges::views::reverse)
+			if (auto currentPosition = findSlot(slot))
+				targetPositions.at(*currentPosition) = static_cast<int>(targetPosition);
+			else
 			{
-				std::swap(m_stack.back(), m_stack[m_stack.size() - sourceDepth - 1]);
-				m_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(sourceDepth)));
+				std::visit(util::GenericVisitor{
+					[&](LiteralSlot const& _l)
+					{
+						m_stack.emplace_back(_l);
+						m_assembly.appendConstant(_l.value);
+					},
+					[&](VariableSlot const& _l)
+					{
+						if (m_unallocatedReturnVariables.count(_l.variable->variable))
+						{
+							m_stack.emplace_back(_l);
+							m_assembly.appendConstant(0);
+							m_unallocatedReturnVariables.erase(_l.variable->variable);
+						}
+						else
+							yulAssert(false, "");
+					},
+					[](auto const&) { yulAssert(false, ""); }
+				}, slot);
+				added.emplace_back(targetPosition);
 			}
-			if (targetDepth > 0)
-			{
-				std::swap(m_stack.back(), m_stack[m_stack.size() - targetDepth - 1]);
-				m_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(targetDepth)));
-			}
-		}
+		targetPositions += move(added);
 	}
-	pop(m_stack.size() - _target.size(), true);
+
+	std::cout << "   after adding literals: " << stackToString(m_stack) << std::endl;
+	std::cout << "   target positions: ";
+	for(auto x: targetPositions) std::cout << x << " ";
+	std::cout << std::endl;
+
+
+	yulAssert(m_stack.size() >= _target.size(), "");
+
+	util::permute(static_cast<unsigned>(targetPositions.size()), [&](unsigned _idx) { return targetPositions.at(_idx); }, [&](unsigned _depth) {
+		std::swap(targetPositions.back(), targetPositions.at(targetPositions.size() - _depth - 1));
+		std::swap(m_stack.back(), m_stack.at(m_stack.size() - _depth - 1));
+		m_assembly.appendInstruction(evmasm::swapInstruction(_depth));
+	}, [&]() {
+		targetPositions.pop_back();
+		m_stack.pop_back();
+		m_assembly.appendInstruction(evmasm::Instruction::POP);
+	});
+
 	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
 }
 
@@ -355,7 +401,7 @@ string OptimizedCodeTransform::stackSlotToString(StackSlot const& _slot)
 	}, _slot);
 }
 
-string OptimizedCodeTransform::stackToString(vector<StackSlot> const& _stack)
+string OptimizedCodeTransform::stackToString(Stack const& _stack)
 {
 	string result("[ ");
 	for (auto const& slot: _stack)

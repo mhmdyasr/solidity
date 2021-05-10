@@ -40,12 +40,6 @@ namespace solidity::yul
 {
 struct AsmAnalysisInfo;
 
-struct ReturnLabelSlot { DFG::FunctionCall const* call = nullptr; };
-struct VariableSlot { DFG::Variable const* variable = nullptr; };
-struct LiteralSlot { u256 value; };
-struct TemporarySlot { std::variant<DFG::FunctionCall const*, DFG::BuiltinCall const*> call; size_t idx; };
-using StackSlot = std::variant<ReturnLabelSlot, VariableSlot, LiteralSlot, TemporarySlot>;
-
 struct OptimizedCodeTransformContext
 {
 	std::unique_ptr<DFG> dfg;
@@ -85,14 +79,14 @@ private:
 
 	AbstractAssembly::LabelID getFunctionLabel(Scope::Function const& _function);
 
-	size_t variableStackDepth(DFG::Variable const& _var);
+	std::optional<size_t> variableStackDepth(DFG::Variable const& _var);
 
 	OptimizedCodeTransformContext& m_context;
 	AbstractAssembly& m_assembly;
 	BuiltinContext& m_builtinContext;
 	bool const m_useNamedLabelsForFunctions = true;
 
-	std::vector<StackSlot> m_stack;
+	Stack m_stack;
 	std::set<Scope::Variable const*> m_unallocatedReturnVariables;
 
 	std::map<DFG::BasicBlock const*, AbstractAssembly::LabelID> m_jumpLabels;
@@ -109,11 +103,11 @@ private:
 		}
 	}
 
-	void shuffleStackTo(std::vector<StackSlot> const& _target);
+	void shuffleStackTo(Stack const& _target);
 
 	// Debugging.
 	static std::string stackSlotToString(StackSlot const& _slot);
-	static std::string stackToString(std::vector<StackSlot> const& _stack);
+	static std::string stackToString(Stack const& _stack);
 };
 
 }

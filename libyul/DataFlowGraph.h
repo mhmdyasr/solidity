@@ -25,10 +25,19 @@
 #include <libyul/optimiser/ASTWalker.h>
 #include <libyul/Scope.h>
 
+#include <deque>
 #include <vector>
 
 namespace solidity::yul
 {
+
+struct ReturnLabelSlot;
+struct VariableSlot;
+struct LiteralSlot;
+struct TemporarySlot;
+using StackSlot = std::variant<ReturnLabelSlot, VariableSlot, LiteralSlot, TemporarySlot>;
+using Stack = std::vector<StackSlot>;
+
 
 struct DFG
 {
@@ -72,6 +81,7 @@ struct DFG
 		std::shared_ptr<DebugData const> debugData;
 		std::vector<Variable> variables;
 		std::optional<Expression> value;
+		std::optional<Stack> targetLayout; // filled by StackLayoutGenerator
 	};
 	struct Assignment
 	{
@@ -86,6 +96,7 @@ struct DFG
 	};
 	using Statement = std::variant<Declaration, Assignment, ExpressionStatement>;
 
+	struct FunctionInfo;
 	struct BasicBlock
 	{
 		std::vector<BasicBlock const*> entries;
@@ -93,17 +104,23 @@ struct DFG
 		struct ConditionalJump
 		{
 			Expression condition;
-			BasicBlock const* nonZero = nullptr;
-			BasicBlock const* zero = nullptr;
+			BasicBlock* nonZero = nullptr;
+			BasicBlock* zero = nullptr;
 		};
 		struct Jump
 		{
-			BasicBlock const* target = nullptr;
+			BasicBlock* target = nullptr;
 		};
-		struct FunctionReturn {};
+		struct FunctionReturn { DFG::FunctionInfo* info = nullptr; };
 		struct Stop {};
 		struct Revert {};
 		std::variant<std::monostate, Jump, ConditionalJump, FunctionReturn, Stop, Revert> exit;
+		struct StackLayout
+		{
+			Stack entry;
+			Stack exit;
+		};
+		std::optional<StackLayout> stackLayout;
 	};
 	std::list<BasicBlock> blocks;
 	std::vector<Scope::Variable> ghostVariables;
@@ -125,6 +142,36 @@ struct DFG
 	{
 		return blocks.emplace_back(BasicBlock{});
 	}
+};
+
+struct ReturnLabelSlot { DFG::FunctionCall const* call = nullptr; };
+struct VariableSlot { DFG::Variable const* variable = nullptr; };
+struct LiteralSlot { u256 value; };
+struct TemporarySlot { std::variant<DFG::FunctionCall const*, DFG::BuiltinCall const*> call; size_t idx = 0; };
+
+class StackLayoutGenerator
+{
+public:
+	static void generate(DFG::BasicBlock& _entry)
+	{
+		StackLayoutGenerator{}(_entry);
+	}
+	static void generate(DFG::FunctionInfo& _info);
+	void operator()(DFG::BasicBlock& _block);
+
+	void operator()(DFG::Declaration& _declaration);
+	void operator()(DFG::Assignment& _declaration);
+	void operator()(DFG::ExpressionStatement& _declaration);
+
+	void operator()(DFG::Variable& _variable);
+	void operator()(DFG::Literal& _literal);
+	void operator()(DFG::FunctionCall& _call);
+	void operator()(DFG::BuiltinCall& _call);
+
+	static Stack combineStacks(Stack const& _stack1, Stack const& _stack2);
+private:
+	StackLayoutGenerator() {}
+	Stack* m_currentStack = nullptr;
 };
 
 class DataFlowGraphBuilder

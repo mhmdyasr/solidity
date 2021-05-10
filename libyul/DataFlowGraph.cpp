@@ -21,12 +21,15 @@
 #include <libyul/AsmPrinter.h>
 
 #include <libsolutil/cxx20.h>
+#include <libsolutil/Permutations.h>
 #include <libsolutil/Visitor.h>
 
 #include <range/v3/range/conversion.hpp>
 #include <range/v3/view/enumerate.hpp>
 #include <range/v3/view/drop_last.hpp>
 #include <range/v3/view/filter.hpp>
+#include <range/v3/view/iota.hpp>
+#include <range/v3/view/map.hpp>
 #include <range/v3/view/reverse.hpp>
 #include <range/v3/view/take_last.hpp>
 #include <range/v3/view/transform.hpp>
@@ -50,7 +53,169 @@ std::unique_ptr<DFG> DataFlowGraphBuilder::build(
 	builder(_block);
 	result->exits = builder.m_exits;
 	result->exits.insert(builder.m_currentBlock);
+
+	StackLayoutGenerator::generate(*result->entry);
+	for (auto& funInfo: result->functions | ranges::views::values)
+		StackLayoutGenerator::generate(funInfo);
+
 	return result;
+}
+
+void StackLayoutGenerator::generate(DFG::FunctionInfo& _info)
+{
+	StackLayoutGenerator generator{};
+	generator(*_info.entry);
+}
+
+Stack StackLayoutGenerator::combineStacks(Stack const&, Stack const&)
+{
+	yulAssert(false, "");
+	return {};
+}
+
+void StackLayoutGenerator::operator()(DFG::BasicBlock& _block)
+{
+	if (_block.stackLayout.has_value())
+		return;
+	DFG::BasicBlock::StackLayout& layout = _block.stackLayout.emplace();
+
+	std::visit(util::GenericVisitor{
+		[](std::monostate) {},
+		[&](DFG::BasicBlock::Jump& _jump)
+		{
+			StackLayoutGenerator{}(*_jump.target);
+			yulAssert(_jump.target->stackLayout.has_value(), "");
+			layout.exit = _jump.target->stackLayout->entry;
+		},
+		[&](DFG::BasicBlock::ConditionalJump const& _conditonalJump)
+		{
+			StackLayoutGenerator{}(*_conditonalJump.zero);
+			yulAssert(_conditonalJump.zero->stackLayout.has_value(), "");
+			StackLayoutGenerator{}(*_conditonalJump.nonZero);
+			yulAssert(_conditonalJump.nonZero->stackLayout.has_value(), "");
+			layout.exit = combineStacks(_conditonalJump.zero->stackLayout->entry, _conditonalJump.nonZero->stackLayout->entry);
+		},
+		[&](DFG::BasicBlock::FunctionReturn const& _functionReturn)
+		{
+			yulAssert(_functionReturn.info, "");
+			layout.exit = _functionReturn.info->returnVariables | ranges::views::transform([](DFG::Variable const& _var){
+				return VariableSlot{&_var};
+			}) | ranges::to<Stack>;
+			layout.exit.emplace_back(ReturnLabelSlot{});
+		},
+		[](DFG::BasicBlock::Stop const&) { },
+		[](DFG::BasicBlock::Revert const&) { }
+	}, _block.exit);
+
+	layout.entry = layout.exit;
+	m_currentStack = &layout.entry;
+
+	for(auto& statement: _block.statements | ranges::views::reverse)
+	{
+		std::visit(*this, statement);
+	}
+
+}
+
+void StackLayoutGenerator::operator()(DFG::Assignment& _assignment)
+{
+	std::visit(*this, _assignment.value);
+	while(!m_currentStack->empty() && std::holds_alternative<LiteralSlot>(m_currentStack->back()))
+		m_currentStack->pop_back();
+	// TODO: Variables that are assigned don't need to be kept on stack previously.
+}
+
+void StackLayoutGenerator::operator()(DFG::Declaration& _declaration)
+{
+	yulAssert(m_currentStack, "");
+	yulAssert(!_declaration.targetLayout.has_value(), "");
+	_declaration.targetLayout = *m_currentStack;
+	// Determine the target positions of each declared variable, if any, and count the number of variables to be kept.
+	//auto& targetPositions = _declaration.targetPositions.emplace(vector<int>(_declaration.variables.size(), -1));
+	vector<int> targetPositions(_declaration.variables.size(), -1);
+	set<unsigned> targetPositionSet;
+	size_t numToKeep = 0;
+	for (auto&& [position, slot]: *m_currentStack | ranges::views::enumerate)
+		if (VariableSlot const* varSlot = get_if<VariableSlot>(&slot))
+			for (auto&& [declaredVar, declaredVarPosition]: ranges::zip_view(_declaration.variables, targetPositions))
+				if (declaredVar.variable == varSlot->variable->variable)
+				{
+					numToKeep++;
+					targetPositionSet.insert(static_cast<unsigned>(position));
+					declaredVarPosition = static_cast<int>(position);
+				}
+
+	struct PreviousSlot { size_t x; };
+	vector<std::variant<PreviousSlot, int>> layout;
+	// Before the declaration the stack has size m_currentStack->size() - numToKeep
+	for(size_t i = 0; i < m_currentStack->size() - numToKeep; ++i)
+		layout.emplace_back(PreviousSlot{i});
+	// Evaluating the declaration value adds variables with known target positions.
+	layout += targetPositions;
+
+	// Simulate a permutation of the declared variables to their target positions.
+	// Previous variables are assumed to be already in place, except they are in a slot for one of the declared variables.
+	util::permute(static_cast<unsigned>(layout.size()), [&](unsigned _i) {
+		if (int* x = get_if<int>(&layout.at(_i)))
+			return *x;
+		return static_cast<int>(_i);
+	}, [&](unsigned _x) {
+		std::swap(layout.back(), layout[layout.size() - _x - 1]);
+	}, [&]() { layout.pop_back(); });
+
+	// Now we can construct the ideal layout before the declaration.
+	// "layout" has the declared variables in the desired position and
+	// for any PreviousSlot{x}, x yields the ideal place of the slot before the declaration.
+	vector<optional<StackSlot>> idealLayout(m_currentStack->size() - numToKeep, nullopt);
+	for (auto const& [slot, idealPosition]: ranges::zip_view(*m_currentStack, layout))
+		if (PreviousSlot* previousSlot = std::get_if<PreviousSlot>(&idealPosition))
+			idealLayout.at(previousSlot->x) = slot;
+
+	m_currentStack->resize(idealLayout.size());
+	for (auto&& [slot, idealSlot]: ranges::zip_view(*m_currentStack, idealLayout))
+	{
+		yulAssert(idealSlot.has_value(), "");
+		slot = *idealSlot;
+	}
+}
+
+void StackLayoutGenerator::operator()(DFG::Variable& _variable)
+{
+	yulAssert(m_currentStack, "");
+	for(auto const& slot: *m_currentStack)
+		if (VariableSlot const* stackVar = get_if<VariableSlot>(&slot))
+			if (stackVar->variable->variable == _variable.variable)
+				return;
+	m_currentStack->emplace_back(VariableSlot{&_variable});
+}
+void StackLayoutGenerator::operator()(DFG::Literal& _literal)
+{
+	yulAssert(m_currentStack, "");
+	for(auto const& slot: *m_currentStack)
+		if (LiteralSlot const* stackLiteral = get_if<LiteralSlot>(&slot))
+			if (stackLiteral->value == _literal.value)
+				return;
+	m_currentStack->emplace_back(LiteralSlot{_literal.value});
+}
+void StackLayoutGenerator::operator()(DFG::FunctionCall& _call)
+{
+	for(auto& argument: _call.arguments)
+		std::visit(*this, argument);
+	m_currentStack->emplace_back(ReturnLabelSlot{&_call});
+}
+void StackLayoutGenerator::operator()(DFG::BuiltinCall& _call)
+{
+	for(auto& argument: _call.arguments)
+		std::visit(*this, argument);
+	while(!m_currentStack->empty() && std::holds_alternative<LiteralSlot>(m_currentStack->back()))
+		m_currentStack->pop_back();
+}
+
+void StackLayoutGenerator::operator()(DFG::ExpressionStatement& _expressionStatement)
+{
+	std::visit(*this, _expressionStatement.expression);
+	while(!m_currentStack->empty() && std::holds_alternative<LiteralSlot>(m_currentStack->back()))
+		m_currentStack->pop_back();
 }
 
 DataFlowGraphBuilder::DataFlowGraphBuilder(
@@ -126,7 +291,8 @@ void DataFlowGraphBuilder::operator()(VariableDeclaration const& _varDecl)
 				return DFG::Variable{_var.debugData, &std::get<Scope::Variable>(m_scope->identifiers.at(_var.name))};
 			}
 		) | ranges::to<vector<DFG::Variable>>,
-		_varDecl.value ? optional(std::visit(*this, *_varDecl.value)) : std::nullopt
+		_varDecl.value ? optional(std::visit(*this, *_varDecl.value)) : std::nullopt,
+		std::nullopt
 	});
 }
 void DataFlowGraphBuilder::operator()(Assignment const& _assignment)
@@ -198,7 +364,8 @@ void DataFlowGraphBuilder::operator()(Switch const& _switch)
 		DFG::Declaration{
 			_switch.debugData,
 			{ghostVariable},
-			std::visit(*this, *_switch.expression)
+			std::visit(*this, *_switch.expression),
+			std::nullopt
 		}
 	);
 	auto makeValueCompare = [&](Literal const& _value) {
@@ -311,6 +478,7 @@ void DataFlowGraphBuilder::operator()(FunctionDefinition const& _function)
 
 	DataFlowGraphBuilder builder{m_graph, m_info, m_dialect};
 	builder.m_currentFunctionExit = &m_graph.makeBlock();
+	builder.m_currentFunctionExit->exit = DFG::BasicBlock::FunctionReturn{&info};
 	builder.m_currentBlock = info.entry;
 	builder(_function.body);
 	builder.jump(*builder.m_currentFunctionExit);
