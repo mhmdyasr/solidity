@@ -40,13 +40,30 @@ namespace solidity::yul
 {
 struct AsmAnalysisInfo;
 
+struct CodeGenerationContext
+{
+	AbstractAssembly& assembly;
+	BuiltinContext& builtinContext;
+	Stack stack;
+};
+
+struct BlockGenerator
+{
+	virtual ~BlockGenerator() {}
+	virtual void operator()(CodeGenerationContext& _context) const = 0;
+};
+
+struct BlockGenerationInfo {
+	std::vector<std::unique_ptr<BlockGenerator>> generators;
+	std::optional<AbstractAssembly::LabelID> label;
+	Stack entryLayout;
+	Stack exitLayout;
+};
 struct OptimizedCodeTransformContext
 {
 	std::unique_ptr<DFG> dfg;
-	std::map<Scope::Function const*, AbstractAssembly::LabelID> functionEntries;
-	std::list<Scope::Function const*> stagedFunctions;
-	std::map<DFG::BasicBlock const*, AbstractAssembly::LabelID> blockLabels;
-	std::list<std::pair<DFG::BasicBlock const*, std::vector<StackSlot>>> stagedBlocks;
+	std::list<BlockGenerationInfo> stagedBlocks;
+	std::map<DFG::BasicBlock const*, BlockGenerationInfo&> blockInfos;
 };
 
 class OptimizedCodeTransform
@@ -72,6 +89,8 @@ public:
 	void operator()(DFG::Literal const& _literal);
 	void operator()(DFG::Variable const& _variable);
 
+	void operator()(DFG::FunctionInfo const& _functionInfo);
+
 private:
 	OptimizedCodeTransform(OptimizedCodeTransformContext& _context, AbstractAssembly& _assembly, BuiltinContext& _builtinContext, bool _useNamedLabelsForFunctions);
 
@@ -79,33 +98,39 @@ private:
 
 	AbstractAssembly::LabelID getFunctionLabel(Scope::Function const& _function);
 
-	std::optional<size_t> variableStackDepth(DFG::Variable const& _var);
-
 	OptimizedCodeTransformContext& m_context;
 	AbstractAssembly& m_assembly;
 	BuiltinContext& m_builtinContext;
 	bool const m_useNamedLabelsForFunctions = true;
 
-	Stack m_stack;
-	std::set<Scope::Variable const*> m_unallocatedReturnVariables;
+	BlockGenerationInfo* m_currentBlockInfo;
+	Stack* m_stack;
 
-	std::map<DFG::BasicBlock const*, AbstractAssembly::LabelID> m_jumpLabels;
-	std::list<std::pair<DFG::BasicBlock const*, std::vector<StackSlot>>> m_stagedBlocks;
-
-	void pop(size_t _amount = 1, bool _generateCode = false)
+	void pop(size_t _amount = 1)
 	{
-		yulAssert(m_stack.size() >= _amount, "");
+		yulAssert(m_stack->size() >= _amount, "");
 		while (_amount--)
-		{
-			m_stack.pop_back();
-			if (_generateCode)
-				m_assembly.appendInstruction(evmasm::Instruction::POP);
-		}
+			m_stack->pop_back();
 	}
 
 	void shuffleStackTo(Stack const& _target);
+	Stack combineStack(Stack const& _stack1, Stack const& _stack2);
 
+	template<typename Callable>
+	void stage(Callable&& _generator)
+	{
+		struct Generator: BlockGenerator
+		{
+			Generator(Callable&& _generator): generator(std::forward<Callable>(_generator)) {}
+			Generator(Generator const&) = delete;
+			Generator& operator=(Generator const&) = delete;
+			void operator()(CodeGenerationContext& _context) const override	{ generator(_context); }
+			Callable generator;
+		};
+		m_currentBlockInfo->generators.emplace_back(std::make_unique<Generator>(std::forward<Callable>(_generator)));
+	}
 	// Debugging.
+public:
 	static std::string stackSlotToString(StackSlot const& _slot);
 	static std::string stackToString(Stack const& _stack);
 };

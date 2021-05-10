@@ -456,6 +456,7 @@ void DataFlowGraphBuilder::operator()(FunctionDefinition const& _function)
 
 	DFG::FunctionInfo& info = m_graph.functions[&function] = DFG::FunctionInfo{
 		_function.debugData,
+		&function,
 		&m_graph.makeBlock(),
 		{},
 		{},

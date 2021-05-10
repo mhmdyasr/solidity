@@ -129,6 +129,7 @@ struct DFG
 	struct FunctionInfo
 	{
 		std::shared_ptr<DebugData const> debugData;
+		Scope::Function const* function = nullptr;
 		BasicBlock* entry = nullptr;
 		std::set<BasicBlock*> exits;
 		std::vector<Variable> parameters;
@@ -144,10 +145,34 @@ struct DFG
 	}
 };
 
-struct ReturnLabelSlot { DFG::FunctionCall const* call = nullptr; };
-struct VariableSlot { DFG::Variable const* variable = nullptr; };
-struct LiteralSlot { u256 value; };
-struct TemporarySlot { std::variant<DFG::FunctionCall const*, DFG::BuiltinCall const*> call; size_t idx = 0; };
+struct ReturnLabelSlot
+{
+	/// The call returning to this label or, when generating a function, nullptr for the label to which the function
+	/// is supposed to return.
+	DFG::FunctionCall const* call = nullptr;
+	bool operator==(ReturnLabelSlot const& _rhs) const { return call == _rhs.call; }
+	bool operator<(ReturnLabelSlot const& _rhs) const { return call < _rhs.call; }
+};
+struct VariableSlot
+{
+	DFG::Variable const* variable = nullptr;
+	bool operator==(VariableSlot const& _rhs) const { return variable->variable == _rhs.variable->variable; }
+	bool operator<(VariableSlot const& _rhs) const { return variable->variable < _rhs.variable->variable; }
+};
+struct LiteralSlot
+{
+	u256 value;
+	std::shared_ptr<DebugData const> debugData{};
+	bool operator==(LiteralSlot const& _rhs) const { return value == _rhs.value; }
+	bool operator<(LiteralSlot const& _rhs) const { return value < _rhs.value; }
+};
+struct TemporarySlot
+{
+	std::variant<DFG::FunctionCall const*, DFG::BuiltinCall const*> call;
+	size_t idx = 0;
+	bool operator==(TemporarySlot const& _rhs) const { return call == _rhs.call && idx == _rhs.idx; }
+	bool operator<(TemporarySlot const& _rhs) const { return std::make_pair(call, idx) < std::make_pair(_rhs.call, _rhs.idx); }
+};
 
 class StackLayoutGenerator
 {

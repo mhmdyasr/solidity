@@ -49,4 +49,15 @@ erase_if(std::unordered_map<Key, T, Hash, KeyEqual, Alloc>& _c, Pred _pred)
 	return old_size - _c.size();
 }
 
+// Taken from https://en.cppreference.com/w/cpp/container/deque/erase2
+template<class T, class Alloc, class Pred>
+typename std::deque<T,Alloc>::size_type
+erase_if(std::deque<T,Alloc>& c, Pred pred)
+{
+	auto it = std::remove_if(c.begin(), c.end(), pred);
+	auto r = std::distance(it, c.end());
+	c.erase(it, c.end());
+	return static_cast<typename std::deque<T,Alloc>::size_type>(r);
+}
+
 }
