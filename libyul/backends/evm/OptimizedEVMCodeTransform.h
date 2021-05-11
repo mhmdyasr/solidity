@@ -55,10 +55,11 @@ struct BlockGenerator
 };
 
 struct BlockGenerationInfo {
-	std::vector<std::unique_ptr<BlockGenerator>> generators;
-	std::optional<AbstractAssembly::LabelID> label;
-	Stack entryLayout;
-	Stack exitLayout;
+	DFG::BasicBlock const* block = nullptr;
+	std::vector<std::unique_ptr<BlockGenerator>> generators{};
+	std::optional<AbstractAssembly::LabelID> label{};
+	Stack entryLayout{};
+	Stack exitLayout{};
 };
 struct OptimizedCodeTransformContext
 {
@@ -116,7 +117,7 @@ private:
 	Stack combineStack(Stack const& _stack1, Stack const& _stack2);
 
 	template<typename Callable>
-	void stage(Callable&& _generator)
+	static void stage(BlockGenerationInfo& _info, Callable&& _generator)
 	{
 		struct Generator: BlockGenerator
 		{
@@ -126,7 +127,13 @@ private:
 			void operator()(CodeGenerationContext& _context) const override	{ generator(_context); }
 			Callable generator;
 		};
-		m_currentBlockInfo->generators.emplace_back(std::make_unique<Generator>(std::forward<Callable>(_generator)));
+		_info.generators.emplace_back(std::make_unique<Generator>(std::forward<Callable>(_generator)));
+	}
+	template<typename Callable>
+	void stage(Callable&& _generator)
+	{
+		yulAssert(m_currentBlockInfo, "");
+		stage(*m_currentBlockInfo, std::forward<Callable>(_generator));
 	}
 	// Debugging.
 public:

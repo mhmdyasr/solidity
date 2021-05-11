@@ -36,6 +36,7 @@ using namespace std;
 
 namespace
 {
+#if 0
 template<typename Range, typename Value>
 vector<int> findAllOffsets(Range&& _range, Value&& _value)
 {
@@ -53,44 +54,15 @@ vector<int> findAllOffsets(Range&& _range, Value&& _value)
 	}
 	return result;
 }
-
-template<typename Swap, typename Pop>
-void shuffleStack(Stack& _stack, Stack _targetLayout, Swap _swap, Pop _pop)
-{
-	// TODO: make resilient against duplicates.
-	util::permute(
-		static_cast<unsigned>(_stack.size()),
-		[&](unsigned _i) {
-			if (_stack.at(_i) == _targetLayout.at(_i))
-				return static_cast<int>(_i);
-			for (auto&& [idx, slot]: _targetLayout | ranges::views::enumerate)
-				if (!(_stack.at(idx) == _targetLayout.at(idx)) && (_targetLayout.at(idx) == _stack.at(_i)))
-					return static_cast<int>(idx);
-
-			return -1;
-		},
-		[&](unsigned _i)
-		{
-			std::swap(_targetLayout.back(), _targetLayout.at(_targetLayout.size() - _i - 1));
-			std::swap(_stack.back(), _stack.at(_stack.size() - _i - 1));
-			_swap(_i);
-		},
-		[&]()
-		{
-			_targetLayout.pop_back();
-			_stack.pop_back();
-			_pop();
-		}
-	);
-	//yulAssert(_stack == _targetLayout, "");
-}
+#endif
 
 template<typename Swap, typename Dup, typename Pop, typename PushSlot>
-void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _swap, Dup _dup, PushSlot _push, Pop _pop)
+void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _swap, Dup _dup, PushSlot _push, Pop _pop, bool _silent = false)
 {
 	if (_currentStack == _targetStack)
 		return;
-	std::cout << "CREATE STACK LAYOUT: " << OptimizedCodeTransform::stackToString(_targetStack) << " FROM " << OptimizedCodeTransform::stackToString(_currentStack) << std::endl;
+	if (!_silent)
+		std::cout << "CREATE STACK LAYOUT: " << OptimizedCodeTransform::stackToString(_targetStack) << " FROM " << OptimizedCodeTransform::stackToString(_currentStack) << std::endl;
 
 	auto cleanStackTop = [&]() {
 		while (!_currentStack.empty() && (holds_alternative<JunkSlot>(_currentStack.back()) || !util::findOffset(_targetStack, _currentStack.back())))
@@ -104,14 +76,17 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 	set<StackSlot> assignedToFree;
 	for (auto&& [pos, slot]: _targetStack | ranges::views::enumerate)
 	{
-		std::cout << "Want " << OptimizedCodeTransform::stackSlotToString(slot) << " at " << pos << std::endl;
+		if (!_silent)
+			std::cout << "Want " << OptimizedCodeTransform::stackSlotToString(slot) << " at " << pos << std::endl;
 		if (pos < _currentStack.size() && _currentStack.at(pos) == slot)
 		{
-			std::cout << "OK" << std::endl;
+			if (!_silent)
+				std::cout << "OK" << std::endl;
 		}
 		else if (auto depth = util::findOffset(_currentStack | ranges::views::reverse, slot))
 		{
-			std::cout << "At depth " << *depth << std::endl;
+			if (!_silent)
+				std::cout << "At depth " << *depth << std::endl;
 			size_t offset = _currentStack.size() - *depth - 1;
 			if (offset < pos)
 			{
@@ -120,7 +95,8 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 
 				if (_currentStack.size() - pos - 1 > 0)
 				{
-					std::cout << "swap " << _currentStack.size() - pos - 1 << std::endl;
+					if (!_silent)
+						std::cout << "swap " << _currentStack.size() - pos - 1 << std::endl;
 					_swap(static_cast<unsigned>(_currentStack.size() - pos - 1));
 					std::swap(_currentStack.back(), _currentStack.at(pos));
 					cleanStackTop();
@@ -130,14 +106,16 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 			{
 				if (*depth > 0)
 				{
-					std::cout << "swap up: " << *depth << std::endl;
+					if (!_silent)
+						std::cout << "swap up: " << *depth << std::endl;
 					_swap(static_cast<unsigned>(*depth));
 					std::swap(_currentStack.back(), _currentStack.at(_currentStack.size() - *depth - 1));
 				}
 
 				if (_currentStack.size() - pos - 1 > 0)
 				{
-					std::cout << "swap " << _currentStack.size() - pos - 1 << std::endl;
+					if (!_silent)
+						std::cout << "swap " << _currentStack.size() - pos - 1 << std::endl;
 					_swap(static_cast<unsigned>(_currentStack.size() - pos - 1));
 					std::swap(_currentStack.back(), _currentStack.at(pos));
 					cleanStackTop();
@@ -146,7 +124,8 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 		}
 		else
 		{
-			std::cout << "Push slot" << std::endl;
+			if (!_silent)
+				std::cout << "Push slot" << std::endl;
 			_push(slot);
 			_currentStack.emplace_back(slot);
 			if (_currentStack.size() - pos - 1 > 0)
@@ -163,7 +142,8 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 		_currentStack.pop_back();
 	}
 
-	std::cout << "CREATED STACK LAYOUT: " << OptimizedCodeTransform::stackToString(_currentStack) << std::endl;
+	if (!_silent)
+		std::cout << "CREATED STACK LAYOUT: " << OptimizedCodeTransform::stackToString(_currentStack) << std::endl;
 }
 
 void createStackLayout(Stack& _currentStack, Stack _targetStack, CodeGenerationContext& _context)
@@ -317,6 +297,10 @@ void OptimizedCodeTransform::run(
 		{},
 		{}
 	};
+	std::cout << std::endl << std::endl;
+	std::cout << "BACKWARD CODEGEN" << std::endl;
+	std::cout << std::endl << std::endl;
+
 	{
 		OptimizedCodeTransform codeTransform{
 			context,
@@ -327,10 +311,17 @@ void OptimizedCodeTransform::run(
 		codeTransform(*context.dfg->entry);
 	}
 
+	std::cout << std::endl << std::endl;
+	std::cout << "FORWARD CODEGEN" << std::endl;
+	std::cout << std::endl << std::endl;
+
 	CodeGenerationContext generationContext{_assembly, _builtinContext, {}, {}};
 	for(auto& block: context.stagedBlocks)
+	{
+		std::cout << "F GENERATING: " << block.block << " (" << block.generators.size() << " generators)" << std::endl;
 		for (auto const& generator: block.generators | ranges::views::reverse)
 			(*generator)(generationContext);
+	}
 }
 
 void OptimizedCodeTransform::operator()(DFG::FunctionCall const& _call)
@@ -507,6 +498,7 @@ void OptimizedCodeTransform::operator()(DFG::Operation const& _operation)
 		}
 		else
 			break;
+	// TODO: how can we be sure that there are no more duplicates after compression?
 	std::cout << "Operation pre after compress: " << stackToString(*m_stack) << "   " << m_stack << std::endl;
 
 	stage([stack = *m_stack, debug = m_stack](CodeGenerationContext& _context){
@@ -519,56 +511,119 @@ void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
 {
 	if (m_context.blockInfos.count(&_block))
 		return;
-	m_currentBlockInfo = &m_context.stagedBlocks.emplace_back(BlockGenerationInfo{});
+	ScopedSaveAndRestore currentBlockInfoRestore(m_currentBlockInfo, &m_context.stagedBlocks.emplace_back(BlockGenerationInfo{&_block}));
+	ScopedSaveAndRestore stackRestore(m_stack, nullptr);
 	m_context.blockInfos.emplace(&_block, *m_currentBlockInfo);
 
-	std::visit(util::GenericVisitor{
-		[&](std::monostate)
-		{
-			stage([](CodeGenerationContext& _context) {
-				std::cout << "F: MAIN EXIT" << std::endl;
-				_context.assembly.appendInstruction(evmasm::Instruction::STOP);
-				_context.assembly.setStackHeight(0);
-			});
-		},
-		[&](DFG::BasicBlock::Jump const& _jump)
-		{
-			(*this)(*_jump.target);
-			m_currentBlockInfo->exitLayout = m_context.blockInfos.at(_jump.target).entryLayout;
-		},
-		[&](DFG::BasicBlock::ConditionalJump const& _conditonalJump)
-		{
-			(*this)(*_conditonalJump.zero);
-			auto& zeroLayout = m_context.blockInfos.at(_conditonalJump.zero).entryLayout;
-			(*this)(*_conditonalJump.nonZero);
-			auto& nonZeroLayout = m_context.blockInfos.at(_conditonalJump.nonZero).entryLayout;
-			m_currentBlockInfo->exitLayout = combineStack(zeroLayout, nonZeroLayout);
-		},
-		[&](DFG::BasicBlock::FunctionReturn const& _functionReturn)
-		{
-			yulAssert(_functionReturn.info, "");
-			m_currentBlockInfo->exitLayout = _functionReturn.info->returnVariables | ranges::views::transform([](auto const& _varSlot){
-				return StackSlot{_varSlot};
-			}) | ranges::to<Stack>;
-			m_currentBlockInfo->exitLayout.emplace_back(ReturnLabelSlot{});
-			stage([functionInfo = _functionReturn.info, exitLayout = m_currentBlockInfo->exitLayout](CodeGenerationContext& _context) {
-				std::cout << "Return from function " << functionInfo->function->name.str() << std::endl;
-				createStackLayout(_context.stack, exitLayout, _context);
-				_context.assembly.setSourceLocation(locationOf(*functionInfo));
-				_context.assembly.appendJump(0, AbstractAssembly::JumpType::OutOfFunction); // TODO: stack height diff.
-				_context.assembly.setStackHeight(0);
-				_context.stack.clear();
-			});
-		},
-		[](DFG::BasicBlock::Stop const&) { },
-		[](DFG::BasicBlock::Revert const&) { }
-	}, _block.exit);
+	std::cout << "B: BLOCK: " << &_block << std::endl;
+	{
+		std::visit(util::GenericVisitor{
+			[&](std::monostate)
+			{
+				stage([](CodeGenerationContext& _context) {
+					std::cout << "F: MAIN EXIT" << std::endl;
+					_context.assembly.appendInstruction(evmasm::Instruction::STOP);
+					_context.assembly.setStackHeight(0);
+				});
+			},
+			[&](DFG::BasicBlock::Jump const& _jump)
+			{
+				std::cout << "B: JUMP EXIT TO: " << _jump.target << std::endl;
+				(*this)(*_jump.target);
+				auto& targetInfo = m_context.blockInfos.at(_jump.target);
+				m_currentBlockInfo->exitLayout = targetInfo.entryLayout;
+				if (!targetInfo.label)
+				{
+					targetInfo.label = m_assembly.newLabelId();
+					stage(targetInfo, [label = *targetInfo.label, entryLayout = m_currentBlockInfo->exitLayout](CodeGenerationContext& _context) {
+						_context.assembly.appendLabel(label);
+						_context.assembly.setStackHeight(static_cast<int>(entryLayout.size()));
+						_context.stack = entryLayout;
+					});
+				}
+				stage([label = *targetInfo.label](CodeGenerationContext& _context) {
+					_context.assembly.appendJumpTo(label);
+				});
+			},
+			[&](DFG::BasicBlock::ConditionalJump const& _conditionalJump)
+			{
+				std::cout << "B: CONDITIONAL JUMP EXIT TO: " << _conditionalJump.zero << " / " << _conditionalJump.nonZero << std::endl;
+				(*this)(*_conditionalJump.zero);
+				auto& zeroInfo = m_context.blockInfos.at(_conditionalJump.zero);
+				(*this)(*_conditionalJump.nonZero);
+				auto& nonZeroInfo = m_context.blockInfos.at(_conditionalJump.nonZero);
+				m_currentBlockInfo->exitLayout = combineStack(zeroInfo.entryLayout, nonZeroInfo.entryLayout);
+				yulAssert(!zeroInfo.label, "");
+				{
+					zeroInfo.label = m_assembly.newLabelId();
+					stage(zeroInfo, [label = *zeroInfo.label, entryLayout = m_currentBlockInfo->exitLayout](CodeGenerationContext& _context) {
+						_context.assembly.appendLabel(label);
+						_context.assembly.setStackHeight(static_cast<int>(entryLayout.size()));
+						_context.stack = entryLayout;
+					});
+				}
+				yulAssert(!nonZeroInfo.label, "");
+				{
+					nonZeroInfo.label = m_assembly.newLabelId();
+					stage(nonZeroInfo, [label = *nonZeroInfo.label, entryLayout = m_currentBlockInfo->exitLayout](CodeGenerationContext& _context) {
+						_context.assembly.appendLabel(label);
+						_context.assembly.setStackHeight(static_cast<int>(entryLayout.size()));
+						_context.stack = entryLayout;
+					});
+				}
+				m_currentBlockInfo->exitLayout.emplace_back(_conditionalJump.condition);
+				stage([zeroInfo = &zeroInfo, nonZeroInfo = &nonZeroInfo, conditionalJump = &_conditionalJump, layout = m_currentBlockInfo->exitLayout](CodeGenerationContext& _context){
+					std::cout << "F: Conditonal jump: " << stackToString(layout) << " / " << stackToString(_context.stack) << std::endl;
+					std::cout << "F: Zero block: " << zeroInfo->block << std::endl;
+					std::cout << "F: NonZero block: " << nonZeroInfo->block << std::endl;
+					_context.assembly.appendJumpToIf(*nonZeroInfo->label);
+					_context.stack.pop_back();
+					_context.assembly.appendJumpTo(*zeroInfo->label); // TODO: generate in place if possible.
+				});
+			},
+			[&](DFG::BasicBlock::FunctionReturn const& _functionReturn)
+			{
+				yulAssert(_functionReturn.info, "");
+				m_currentBlockInfo->exitLayout = _functionReturn.info->returnVariables | ranges::views::transform([](auto const& _varSlot){
+					return StackSlot{_varSlot};
+				}) | ranges::to<Stack>;
+				m_currentBlockInfo->exitLayout.emplace_back(ReturnLabelSlot{});
+				stage([functionInfo = _functionReturn.info, exitLayout = m_currentBlockInfo->exitLayout](CodeGenerationContext& _context) {
+					std::cout << "Return from function " << functionInfo->function->name.str() << std::endl;
+					createStackLayout(_context.stack, exitLayout, _context);
+					_context.assembly.setSourceLocation(locationOf(*functionInfo));
+					_context.assembly.appendJump(0, AbstractAssembly::JumpType::OutOfFunction); // TODO: stack height diff.
+					_context.assembly.setStackHeight(0);
+					_context.stack.clear();
+				});
+			},
+			[](DFG::BasicBlock::Stop const&) { yulAssert(false, "STOP EXIT"); },
+			[](DFG::BasicBlock::Revert const&) { yulAssert(false, "REVERT EXIT"); }
+		}, _block.exit);
+	}
 
 	m_currentBlockInfo->entryLayout = m_currentBlockInfo->exitLayout;
 	m_stack = &m_currentBlockInfo->entryLayout;
 
+	std::cout << "B: EXIT LAYOUT (" << &_block << "): " << stackToString(m_currentBlockInfo->exitLayout) << std::endl;
+
 	for(auto& operation: _block.operations | ranges::views::reverse)
 		(*this)(operation);
+
+	std::cout << "B: ENTRY LAYOUT (" << &_block << "): " << stackToString(m_currentBlockInfo->entryLayout) << std::endl;
+
+	stage([layout = m_currentBlockInfo->entryLayout, block = &_block](CodeGenerationContext& _context){
+		// TODO: source location.
+		std::cout << "F: set block entry layout: " << stackToString(layout) << " (" << block << ")" << std::endl;
+		std::cout << "Layout now: " << stackToString(_context.stack) << " wanted: " << stackToString(layout) << std::endl;
+		createStackLayout(_context.stack, layout, _context);
+	});
+
+	for (auto const& entry: _block.entries)
+	{
+		std::cout << "B: ENTRY TO (" << &_block << ") FROM: " << entry << " (" << m_context.blockInfos.count(entry) << ")" << std::endl;
+		(*this)(*entry);
+	}
 }
 
 AbstractAssembly::LabelID OptimizedCodeTransform::getFunctionLabel(Scope::Function const& _function)
@@ -641,14 +696,32 @@ Stack OptimizedCodeTransform::combineStack(Stack const& _stack1, Stack const& _s
 	Stack candidate(slotSet.begin(), slotSet.end());
 	std::map<Stack, size_t> requiredSwaps;
 
+	std::cout << "COMBINE STACKS: " << stackToString(_stack1) << " + " << stackToString(_stack2) << std::endl;
+
 	auto evaluate = [&](Stack const& _candidate) -> size_t {
-		size_t numSwaps = 0;
-		Stack testStack = _stack1;
-		ScopedSaveAndRestore restoreStack(m_stack, &testStack);
-		shuffleStack(testStack, _candidate, [&](unsigned) { ++numSwaps; }, [](){});
-		testStack = _stack2;
-		shuffleStack(testStack, _candidate, [&](unsigned) { ++numSwaps; }, [](){});
-		return numSwaps;
+		unsigned numOps = 0;
+		Stack testStack = _candidate;
+		createStackLayout(
+			testStack,
+			_stack1,
+			[&](unsigned) { ++numOps; },
+			[&](unsigned) { ++numOps; },
+			[&](StackSlot const&) {},
+			[&](){},
+			true
+		);
+		testStack = _candidate;
+		createStackLayout(
+			testStack,
+			_stack2,
+			[&](unsigned) { ++numOps; },
+			[&](unsigned) { ++numOps; },
+			[&](StackSlot const&) {},
+			[&](){},
+			true
+		);
+		std::cout << "  CANDIDATE: " << stackToString(_candidate) << ": " << numOps << " swaps." << std::endl;
+		return numOps;
 	};
 
 	// See https://en.wikipedia.org/wiki/Heap's_algorithm
@@ -674,6 +747,8 @@ Stack OptimizedCodeTransform::combineStack(Stack const& _stack1, Stack const& _s
 			++i;
 		}
 	}
+
+	std::cout << " BEST: " << stackToString(requiredSwaps.begin()->first) << " (" << requiredSwaps.begin()->second << " swaps)" << std::endl;
 
 	return requiredSwaps.begin()->first;
 }
