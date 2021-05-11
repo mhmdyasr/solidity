@@ -299,8 +299,8 @@ namespace detail
 {
 
 template<typename Container, typename Value>
-auto findOffset(Container&& _container, Value&& _value, int)
--> decltype(_container.find(std::forward<Value>(_value)) == _container.end(), std::optional<size_t>())
+auto findOffset(Container&& _container,  Value&& _value, int)
+-> decltype(_container.find(_value) == _container.end(), std::optional<size_t>())
 {
 	auto it = _container.find(std::forward<Value>(_value));
 	auto end = _container.end();
@@ -322,11 +322,11 @@ auto findOffset(Range&& _range, Value&& _value, void*)
 
 }
 
-template<typename Range, typename Criterion>
-auto findOffset(Range&& _range, Criterion&& _criterion)
--> decltype(detail::findOffset(std::forward<Range>(_range), std::forward<Criterion>(_criterion), 0))
+template<typename Range>
+auto findOffset(Range&& _range, std::remove_reference_t<decltype(*std::cbegin(_range))> const& _value)
+-> decltype(detail::findOffset(std::forward<Range>(_range), _value, 0))
 {
-	return detail::findOffset(std::forward<Range>(_range), std::forward<Criterion>(_criterion), 0);
+	return detail::findOffset(std::forward<Range>(_range), _value, 0);
 }
 
 template<typename Range, typename Pred>

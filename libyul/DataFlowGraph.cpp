@@ -54,168 +54,7 @@ std::unique_ptr<DFG> DataFlowGraphBuilder::build(
 	result->exits = builder.m_exits;
 	result->exits.insert(builder.m_currentBlock);
 
-	StackLayoutGenerator::generate(*result->entry);
-	for (auto& funInfo: result->functions | ranges::views::values)
-		StackLayoutGenerator::generate(funInfo);
-
 	return result;
-}
-
-void StackLayoutGenerator::generate(DFG::FunctionInfo& _info)
-{
-	StackLayoutGenerator generator{};
-	generator(*_info.entry);
-}
-
-Stack StackLayoutGenerator::combineStacks(Stack const&, Stack const&)
-{
-	yulAssert(false, "");
-	return {};
-}
-
-void StackLayoutGenerator::operator()(DFG::BasicBlock& _block)
-{
-	if (_block.stackLayout.has_value())
-		return;
-	DFG::BasicBlock::StackLayout& layout = _block.stackLayout.emplace();
-
-	std::visit(util::GenericVisitor{
-		[](std::monostate) {},
-		[&](DFG::BasicBlock::Jump& _jump)
-		{
-			StackLayoutGenerator{}(*_jump.target);
-			yulAssert(_jump.target->stackLayout.has_value(), "");
-			layout.exit = _jump.target->stackLayout->entry;
-		},
-		[&](DFG::BasicBlock::ConditionalJump const& _conditonalJump)
-		{
-			StackLayoutGenerator{}(*_conditonalJump.zero);
-			yulAssert(_conditonalJump.zero->stackLayout.has_value(), "");
-			StackLayoutGenerator{}(*_conditonalJump.nonZero);
-			yulAssert(_conditonalJump.nonZero->stackLayout.has_value(), "");
-			layout.exit = combineStacks(_conditonalJump.zero->stackLayout->entry, _conditonalJump.nonZero->stackLayout->entry);
-		},
-		[&](DFG::BasicBlock::FunctionReturn const& _functionReturn)
-		{
-			yulAssert(_functionReturn.info, "");
-			layout.exit = _functionReturn.info->returnVariables | ranges::views::transform([](DFG::Variable const& _var){
-				return VariableSlot{&_var};
-			}) | ranges::to<Stack>;
-			layout.exit.emplace_back(ReturnLabelSlot{});
-		},
-		[](DFG::BasicBlock::Stop const&) { },
-		[](DFG::BasicBlock::Revert const&) { }
-	}, _block.exit);
-
-	layout.entry = layout.exit;
-	m_currentStack = &layout.entry;
-
-	for(auto& statement: _block.statements | ranges::views::reverse)
-	{
-		std::visit(*this, statement);
-	}
-
-}
-
-void StackLayoutGenerator::operator()(DFG::Assignment& _assignment)
-{
-	std::visit(*this, _assignment.value);
-	while(!m_currentStack->empty() && std::holds_alternative<LiteralSlot>(m_currentStack->back()))
-		m_currentStack->pop_back();
-	// TODO: Variables that are assigned don't need to be kept on stack previously.
-}
-
-void StackLayoutGenerator::operator()(DFG::Declaration& _declaration)
-{
-	yulAssert(m_currentStack, "");
-	yulAssert(!_declaration.targetLayout.has_value(), "");
-	_declaration.targetLayout = *m_currentStack;
-	// Determine the target positions of each declared variable, if any, and count the number of variables to be kept.
-	//auto& targetPositions = _declaration.targetPositions.emplace(vector<int>(_declaration.variables.size(), -1));
-	vector<int> targetPositions(_declaration.variables.size(), -1);
-	set<unsigned> targetPositionSet;
-	size_t numToKeep = 0;
-	for (auto&& [position, slot]: *m_currentStack | ranges::views::enumerate)
-		if (VariableSlot const* varSlot = get_if<VariableSlot>(&slot))
-			for (auto&& [declaredVar, declaredVarPosition]: ranges::zip_view(_declaration.variables, targetPositions))
-				if (declaredVar.variable == varSlot->variable->variable)
-				{
-					numToKeep++;
-					targetPositionSet.insert(static_cast<unsigned>(position));
-					declaredVarPosition = static_cast<int>(position);
-				}
-
-	struct PreviousSlot { size_t x; };
-	vector<std::variant<PreviousSlot, int>> layout;
-	// Before the declaration the stack has size m_currentStack->size() - numToKeep
-	for(size_t i = 0; i < m_currentStack->size() - numToKeep; ++i)
-		layout.emplace_back(PreviousSlot{i});
-	// Evaluating the declaration value adds variables with known target positions.
-	layout += targetPositions;
-
-	// Simulate a permutation of the declared variables to their target positions.
-	// Previous variables are assumed to be already in place, except they are in a slot for one of the declared variables.
-	util::permute(static_cast<unsigned>(layout.size()), [&](unsigned _i) {
-		if (int* x = get_if<int>(&layout.at(_i)))
-			return *x;
-		return static_cast<int>(_i);
-	}, [&](unsigned _x) {
-		std::swap(layout.back(), layout[layout.size() - _x - 1]);
-	}, [&]() { layout.pop_back(); });
-
-	// Now we can construct the ideal layout before the declaration.
-	// "layout" has the declared variables in the desired position and
-	// for any PreviousSlot{x}, x yields the ideal place of the slot before the declaration.
-	vector<optional<StackSlot>> idealLayout(m_currentStack->size() - numToKeep, nullopt);
-	for (auto const& [slot, idealPosition]: ranges::zip_view(*m_currentStack, layout))
-		if (PreviousSlot* previousSlot = std::get_if<PreviousSlot>(&idealPosition))
-			idealLayout.at(previousSlot->x) = slot;
-
-	m_currentStack->resize(idealLayout.size());
-	for (auto&& [slot, idealSlot]: ranges::zip_view(*m_currentStack, idealLayout))
-	{
-		yulAssert(idealSlot.has_value(), "");
-		slot = *idealSlot;
-	}
-}
-
-void StackLayoutGenerator::operator()(DFG::Variable& _variable)
-{
-	yulAssert(m_currentStack, "");
-	for(auto const& slot: *m_currentStack)
-		if (VariableSlot const* stackVar = get_if<VariableSlot>(&slot))
-			if (stackVar->variable->variable == _variable.variable)
-				return;
-	m_currentStack->emplace_back(VariableSlot{&_variable});
-}
-void StackLayoutGenerator::operator()(DFG::Literal& _literal)
-{
-	yulAssert(m_currentStack, "");
-	for(auto const& slot: *m_currentStack)
-		if (LiteralSlot const* stackLiteral = get_if<LiteralSlot>(&slot))
-			if (stackLiteral->value == _literal.value)
-				return;
-	m_currentStack->emplace_back(LiteralSlot{_literal.value});
-}
-void StackLayoutGenerator::operator()(DFG::FunctionCall& _call)
-{
-	for(auto& argument: _call.arguments)
-		std::visit(*this, argument);
-	m_currentStack->emplace_back(ReturnLabelSlot{&_call});
-}
-void StackLayoutGenerator::operator()(DFG::BuiltinCall& _call)
-{
-	for(auto& argument: _call.arguments)
-		std::visit(*this, argument);
-	while(!m_currentStack->empty() && std::holds_alternative<LiteralSlot>(m_currentStack->back()))
-		m_currentStack->pop_back();
-}
-
-void StackLayoutGenerator::operator()(DFG::ExpressionStatement& _expressionStatement)
-{
-	std::visit(*this, _expressionStatement.expression);
-	while(!m_currentStack->empty() && std::holds_alternative<LiteralSlot>(m_currentStack->back()))
-		m_currentStack->pop_back();
 }
 
 DataFlowGraphBuilder::DataFlowGraphBuilder(
@@ -229,36 +68,41 @@ m_dialect(_dialect)
 {
 }
 
-DFG::Expression DataFlowGraphBuilder::operator()(Literal const& _literal)
+StackSlot DataFlowGraphBuilder::operator()(Literal const& _literal)
 {
-	return DFG::Literal{_literal.debugData, valueOfLiteral(_literal) };
+	return LiteralSlot{valueOfLiteral(_literal), _literal.debugData};
 }
 
-DFG::Expression DataFlowGraphBuilder::operator()(Identifier const& _identifier)
+StackSlot DataFlowGraphBuilder::operator()(Identifier const& _identifier)
 {
-	return DFG::Variable{_identifier.debugData, &lookupVariable(_identifier.name)};
+	return VariableSlot{&lookupVariable(_identifier.name), _identifier.debugData};
 }
 
-DFG::Expression DataFlowGraphBuilder::operator()(FunctionCall const& _call)
+DFG::Operation& DataFlowGraphBuilder::visitFunctionCall(FunctionCall const& _call)
 {
 	yulAssert(m_scope, "");
+	yulAssert(m_currentBlock, "");
 
 	if (BuiltinFunctionForEVM const* builtin = m_dialect.builtin(_call.functionName.name))
-		return DFG::BuiltinCall{
-			_call.debugData,
-			builtin,
-			&_call,
+	{
+		DFG::Operation& operation = m_currentBlock->operations.emplace_back(DFG::Operation{
 			_call.arguments |
 			ranges::views::enumerate |
+			ranges::views::reverse |
 			ranges::views::filter(util::mapTuple([&](size_t idx, auto const&) {
 				return !builtin->literalArgument(idx).has_value();
 			})) |
-			ranges::views::transform(util::mapTuple([&](size_t, Expression const& _expr) {
-				return std::visit(*this, _expr);
-			})) |
-			ranges::to<vector<DFG::Expression>>,
-			builtin->returns.size()
-		};
+			ranges::views::transform(util::mapTuple([&](size_t, Expression const& _expression) {
+				return std::visit(*this, _expression);
+			})) | ranges::to<Stack>,
+			{},
+			DFG::BuiltinCall{_call.debugData, builtin, &_call},
+		});
+		std::get<DFG::BuiltinCall>(operation.operation).arguments = operation.input.size();
+		for (size_t i: ranges::views::iota(0u, builtin->returns.size()))
+			operation.output.emplace_back(TemporarySlot{&_call, i});
+		return operation;
+	}
 	else
 	{
 		Scope::Function* function = nullptr;
@@ -267,49 +111,102 @@ DFG::Expression DataFlowGraphBuilder::operator()(FunctionCall const& _call)
 			[&](Scope::Function& _function) { function = &_function; }
 		}), "Function name not found.");
 		yulAssert(function, "");
-		return DFG::FunctionCall{
-			_call.debugData,
-			function,
-			_call.arguments |
-			ranges::views::transform([&](Expression const& _expr) {
-				return std::visit(*this, _expr);
-			}) |
-			ranges::to<vector<DFG::Expression>>,
-			function->returns.size()
-		};
+		Stack inputs;
+		inputs.emplace_back(ReturnLabelSlot{&_call});
+		for (Expression const& _expression: _call.arguments | ranges::views::reverse)
+			inputs.emplace_back(std::visit(*this, _expression));
+		DFG::Operation& operation = m_currentBlock->operations.emplace_back(DFG::Operation{
+			inputs,
+			{},
+			DFG::FunctionCall{_call.debugData, function, &_call}
+		});
+		for (size_t i: ranges::views::iota(0u, function->returns.size()))
+			operation.output.emplace_back(TemporarySlot{&_call, i});
+		return operation;
 	}
+}
+
+StackSlot DataFlowGraphBuilder::operator()(FunctionCall const& _call)
+{
+	DFG::Operation& operation = visitFunctionCall(_call);
+	yulAssert(operation.output.size() == 1, "");
+	return operation.output.front();
 }
 
 void DataFlowGraphBuilder::operator()(VariableDeclaration const& _varDecl)
 {
 	yulAssert(m_currentBlock, "");
-	m_currentBlock->statements.emplace_back(DFG::Declaration{
-		_varDecl.debugData,
-		_varDecl.variables | ranges::views::transform(
-			[&](TypedName const &_var)
-			{
-				return DFG::Variable{_var.debugData, &std::get<Scope::Variable>(m_scope->identifiers.at(_var.name))};
-			}
-		) | ranges::to<vector<DFG::Variable>>,
-		_varDecl.value ? optional(std::visit(*this, *_varDecl.value)) : std::nullopt,
-		std::nullopt
-	});
+	std::vector<VariableSlot> variables = _varDecl.variables | ranges::views::transform([&](TypedName const& _var) {
+		return VariableSlot{&lookupVariable(_var.name), _var.debugData};
+	}) | ranges::to<vector<VariableSlot>>;
+	if (_varDecl.value)
+		std::visit(util::GenericVisitor{
+			[&](FunctionCall const& _call) {
+				DFG::Operation& operation = visitFunctionCall(_call);
+				yulAssert(variables.size() == operation.output.size(), "");
+				m_currentBlock->operations.emplace_back(DFG::Operation{
+					operation.output,
+					variables | ranges::to<Stack>,
+					DFG::Assignment{_varDecl.debugData, variables}
+				});
+			},
+			[&](auto const& _identifierOrLiteral) {
+				yulAssert(variables.size() == 1, "");
+				m_currentBlock->operations.emplace_back(DFG::Operation{
+					{(*this)(_identifierOrLiteral)},
+					variables | ranges::to<Stack>,
+					DFG::Assignment{_varDecl.debugData, variables}
+				});
+			},
+		}, *_varDecl.value);
+	else
+	{
+
+		m_currentBlock->operations.emplace_back(DFG::Operation{
+			ranges::views::iota(0u, _varDecl.variables.size()) | ranges::views::transform([&](size_t) {
+				return LiteralSlot{0, _varDecl.debugData};
+			}) | ranges::to<Stack>,
+			variables | ranges::to<Stack>,
+			DFG::Assignment{_varDecl.debugData, variables}
+		});
+	}
 }
 void DataFlowGraphBuilder::operator()(Assignment const& _assignment)
 {
 	yulAssert(m_currentBlock, "");
-	m_currentBlock->statements.emplace_back(DFG::Assignment{
-		_assignment.debugData,
-		_assignment.variableNames | ranges::views::transform([&](Identifier const& _var) {
-			return DFG::Variable{_var.debugData, &lookupVariable(_var.name)};
-		}) | ranges::to<vector<DFG::Variable>>,
-		std::visit(*this, *_assignment.value)
-	});
+	vector<VariableSlot> variables = _assignment.variableNames | ranges::views::transform([&](Identifier const& _var) {
+		return VariableSlot{&lookupVariable(_var.name), _var.debugData};
+	}) | ranges::to<vector<VariableSlot>>;
+	std::visit(util::GenericVisitor{
+		[&](FunctionCall const& _call) {
+			DFG::Operation& operation = visitFunctionCall(_call);
+			yulAssert(variables.size() == operation.output.size(), "");
+			m_currentBlock->operations.emplace_back(DFG::Operation{
+				operation.output,
+				variables | ranges::to<Stack>,
+				DFG::Assignment{_assignment.debugData, variables}
+			});
+		},
+		[&](auto const& _identifierOrLiteral) {
+			yulAssert(variables.size() == 1, "");
+			m_currentBlock->operations.emplace_back(DFG::Operation{
+				{(*this)(_identifierOrLiteral)},
+				variables | ranges::to<Stack>,
+				DFG::Assignment{_assignment.debugData, variables}
+			});
+		},
+	}, *_assignment.value);
 }
 void DataFlowGraphBuilder::operator()(ExpressionStatement const& _exprStmt)
 {
 	yulAssert(m_currentBlock, "");
-	m_currentBlock->statements.emplace_back(DFG::ExpressionStatement{_exprStmt.debugData, std::visit(*this, _exprStmt.expression)});
+	std::visit(util::GenericVisitor{
+		[&](FunctionCall const& _call) {
+			DFG::Operation& operation = visitFunctionCall(_call);
+			yulAssert(operation.output.empty(), "");
+		},
+		[&](auto const&) { yulAssert(false, ""); }
+	}, _exprStmt.expression);
 }
 
 void DataFlowGraphBuilder::operator()(Block const& _block)
@@ -319,14 +216,14 @@ void DataFlowGraphBuilder::operator()(Block const& _block)
 		std::visit(*this, statement);
 }
 
-std::pair<DFG::BasicBlock*, DFG::BasicBlock*> DataFlowGraphBuilder::makeConditionalJump(DFG::Expression _condition)
+std::pair<DFG::BasicBlock*, DFG::BasicBlock*> DataFlowGraphBuilder::makeConditionalJump(StackSlot _condition)
 {
 	DFG::BasicBlock& nonZero = m_graph.makeBlock();
 	DFG::BasicBlock& zero = m_graph.makeBlock();
 	makeConditionalJump(move(_condition), nonZero, zero);
 	return {&nonZero, &zero};
 }
-void DataFlowGraphBuilder::makeConditionalJump(DFG::Expression _condition, DFG::BasicBlock& _nonZero, DFG::BasicBlock& _zero)
+void DataFlowGraphBuilder::makeConditionalJump(StackSlot _condition, DFG::BasicBlock& _nonZero, DFG::BasicBlock& _zero)
 {
 	yulAssert(m_currentBlock, "");
 	m_currentBlock->exit = DFG::BasicBlock::ConditionalJump{
@@ -353,21 +250,12 @@ void DataFlowGraphBuilder::operator()(If const& _if)
 	jump(*afterIf);
 }
 
-void DataFlowGraphBuilder::operator()(Switch const& _switch)
+void DataFlowGraphBuilder::operator()(Switch const&)
 {
-	yulAssert(m_currentBlock, "");
-	size_t ghostVariableId = m_graph.ghostVariables.size();
-	DFG::Variable ghostVariable{_switch.debugData, &m_graph.ghostVariables.emplace_back(
-		Scope::Variable{""_yulstring, YulString("GHOST[" + to_string(ghostVariableId) + "]")}
-	)};
-	m_currentBlock->statements.emplace_back(
-		DFG::Declaration{
-			_switch.debugData,
-			{ghostVariable},
-			std::visit(*this, *_switch.expression),
-			std::nullopt
-		}
-	);
+	yulAssert(false, "TODO");
+/*	yulAssert(m_currentBlock, "");
+	StackSlot condition = (*this)(*_switch.expression);
+
 	auto makeValueCompare = [&](Literal const& _value) {
 		yul::FunctionCall const& ghostCall = m_graph.ghostCalls.emplace_back(yul::FunctionCall{
 			_value.debugData,
@@ -401,7 +289,7 @@ void DataFlowGraphBuilder::operator()(Switch const& _switch)
 	}
 	else
 		(*this)(switchCase.body);
-	jump(afterSwitch);
+	jump(afterSwitch);*/
 }
 
 void DataFlowGraphBuilder::operator()(ForLoop const& _loop)
@@ -467,14 +355,14 @@ void DataFlowGraphBuilder::operator()(FunctionDefinition const& _function)
 	Scope* virtualFunctionScope = m_info.scopes.at(m_info.virtualBlocks.at(&_function).get()).get();
 	yulAssert(virtualFunctionScope, "");
 	for (auto const& v: _function.parameters)
-		info.parameters.emplace_back(DFG::Variable{
-			v.debugData,
-			&std::get<Scope::Variable>(virtualFunctionScope->identifiers.at(v.name))
+		info.parameters.emplace_back(VariableSlot{
+			&std::get<Scope::Variable>(virtualFunctionScope->identifiers.at(v.name)),
+			v.debugData
 		});
 	for (auto const& v: _function.returnVariables)
-		info.returnVariables.emplace_back(DFG::Variable{
-			v.debugData,
-			&std::get<Scope::Variable>(virtualFunctionScope->identifiers.at(v.name))
+		info.returnVariables.emplace_back(VariableSlot{
+			&std::get<Scope::Variable>(virtualFunctionScope->identifiers.at(v.name)),
+			v.debugData
 		});
 
 	DataFlowGraphBuilder builder{m_graph, m_info, m_dialect};

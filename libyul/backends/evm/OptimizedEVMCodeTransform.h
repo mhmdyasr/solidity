@@ -45,6 +45,7 @@ struct CodeGenerationContext
 	AbstractAssembly& assembly;
 	BuiltinContext& builtinContext;
 	Stack stack;
+	std::map<yul::FunctionCall const*, AbstractAssembly::LabelID> returnLabels;
 };
 
 struct BlockGenerator
@@ -80,14 +81,12 @@ public:
 	);
 
 	void operator()(DFG::BasicBlock const& _block);
-	void operator()(DFG::Declaration const& _declaration);
-	void operator()(DFG::Assignment const& _assignment);
-	void operator()(DFG::ExpressionStatement const& _expression);
+
+	void operator()(DFG::Operation const& _operation);
 
 	void operator()(DFG::BuiltinCall const& _builtinCall);
 	void operator()(DFG::FunctionCall const& _functionCall);
-	void operator()(DFG::Literal const& _literal);
-	void operator()(DFG::Variable const& _variable);
+	void operator()(DFG::Assignment const& _literal);
 
 	void operator()(DFG::FunctionInfo const& _functionInfo);
 
@@ -113,7 +112,7 @@ private:
 			m_stack->pop_back();
 	}
 
-	void shuffleStackTo(Stack const& _target);
+	void compressStack();
 	Stack combineStack(Stack const& _stack1, Stack const& _stack2);
 
 	template<typename Callable>

@@ -15,15 +15,16 @@
 	along with solidity.  If not, see <http://www.gnu.org/licenses/>.
 */
 // SPDX-License-Identifier: GPL-3.0
-
 #include <libyul/backends/evm/OptimizedEVMCodeTransform.h>
 #include <libyul/DataFlowGraph.h>
 
 #include <libsolutil/Permutations.h>
 #include <libsolutil/Visitor.h>
 
+#include <range/v3/view/drop.hpp>
 #include <range/v3/view/drop_last.hpp>
 #include <range/v3/view/enumerate.hpp>
+#include <range/v3/view/iota.hpp>
 #include <range/v3/view/map.hpp>
 #include <range/v3/view/reverse.hpp>
 #include <range/v3/view/take.hpp>
@@ -35,56 +36,256 @@ using namespace std;
 
 namespace
 {
-template<typename TargetLayout, typename Swap, typename Pop>
-void shuffleStack(std::vector<StackSlot>& _stack, TargetLayout&& _targetLayout, Swap _swap, Pop _pop)
+template<typename Range, typename Value>
+vector<int> findAllOffsets(Range&& _range, Value&& _value)
+{
+	vector<int> result;
+	auto begin = std::begin(_range);
+	auto end = std::end(_range);
+	auto it = begin;
+	while (it != end)
+	{
+		it = std::find(it, end, std::forward<Value>(_value));
+		if (it == end)
+			return result;
+		result.emplace_back(static_cast<int>(std::distance(begin, it)));
+		++it;
+	}
+	return result;
+}
+
+template<typename Swap, typename Pop>
+void shuffleStack(Stack& _stack, Stack _targetLayout, Swap _swap, Pop _pop)
 {
 	// TODO: make resilient against duplicates.
-	std::vector<int> permutation(_stack.size(), -1);
-	for (auto&& [idx, currentSlot]: _stack | ranges::views::enumerate)
-		if (auto offset = util::findOffset(_targetLayout, currentSlot))
-			permutation[idx] = static_cast<int>(*offset);
-
 	util::permute(
-		static_cast<unsigned>(permutation.size()),
-		[&](unsigned _i) { return permutation.at(_i); },
+		static_cast<unsigned>(_stack.size()),
+		[&](unsigned _i) {
+			if (_stack.at(_i) == _targetLayout.at(_i))
+				return static_cast<int>(_i);
+			for (auto&& [idx, slot]: _targetLayout | ranges::views::enumerate)
+				if (!(_stack.at(idx) == _targetLayout.at(idx)) && (_targetLayout.at(idx) == _stack.at(_i)))
+					return static_cast<int>(idx);
+
+			return -1;
+		},
 		[&](unsigned _i)
 		{
-			std::swap(permutation.back(), permutation.at(permutation.size() - _i - 1));
+			std::swap(_targetLayout.back(), _targetLayout.at(_targetLayout.size() - _i - 1));
 			std::swap(_stack.back(), _stack.at(_stack.size() - _i - 1));
 			_swap(_i);
 		},
 		[&]()
 		{
-			permutation.pop_back();
+			_targetLayout.pop_back();
 			_stack.pop_back();
 			_pop();
 		}
 	);
 	//yulAssert(_stack == _targetLayout, "");
 }
-void createStackLayout(std::vector<StackSlot>& _currentStack, std::vector<StackSlot> const& _targetStack, AbstractAssembly& _assembly)
+
+template<typename Swap, typename Dup, typename Pop, typename PushSlot>
+void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _swap, Dup _dup, PushSlot _push, Pop _pop)
 {
+	if (_currentStack == _targetStack)
+		return;
+	std::cout << "CREATE STACK LAYOUT: " << OptimizedCodeTransform::stackToString(_targetStack) << " FROM " << OptimizedCodeTransform::stackToString(_currentStack) << std::endl;
+
+	auto cleanStackTop = [&]() {
+		while (!_currentStack.empty() && (holds_alternative<JunkSlot>(_currentStack.back()) || !util::findOffset(_targetStack, _currentStack.back())))
+		{
+			_pop();
+			_currentStack.pop_back();
+		}
+	};
+	cleanStackTop();
+
+	set<StackSlot> assignedToFree;
+	for (auto&& [pos, slot]: _targetStack | ranges::views::enumerate)
+	{
+		std::cout << "Want " << OptimizedCodeTransform::stackSlotToString(slot) << " at " << pos << std::endl;
+		if (pos < _currentStack.size() && _currentStack.at(pos) == slot)
+		{
+			std::cout << "OK" << std::endl;
+		}
+		else if (auto depth = util::findOffset(_currentStack | ranges::views::reverse, slot))
+		{
+			std::cout << "At depth " << *depth << std::endl;
+			size_t offset = _currentStack.size() - *depth - 1;
+			if (offset < pos)
+			{
+				_dup(static_cast<unsigned>(*depth + 1));
+				_currentStack.emplace_back(_currentStack.at(offset));
+
+				if (_currentStack.size() - pos - 1 > 0)
+				{
+					std::cout << "swap " << _currentStack.size() - pos - 1 << std::endl;
+					_swap(static_cast<unsigned>(_currentStack.size() - pos - 1));
+					std::swap(_currentStack.back(), _currentStack.at(pos));
+					cleanStackTop();
+				}
+			}
+			else
+			{
+				if (*depth > 0)
+				{
+					std::cout << "swap up: " << *depth << std::endl;
+					_swap(static_cast<unsigned>(*depth));
+					std::swap(_currentStack.back(), _currentStack.at(_currentStack.size() - *depth - 1));
+				}
+
+				if (_currentStack.size() - pos - 1 > 0)
+				{
+					std::cout << "swap " << _currentStack.size() - pos - 1 << std::endl;
+					_swap(static_cast<unsigned>(_currentStack.size() - pos - 1));
+					std::swap(_currentStack.back(), _currentStack.at(pos));
+					cleanStackTop();
+				}
+			}
+		}
+		else
+		{
+			std::cout << "Push slot" << std::endl;
+			_push(slot);
+			_currentStack.emplace_back(slot);
+			if (_currentStack.size() - pos - 1 > 0)
+			{
+				_swap(static_cast<unsigned>(_currentStack.size() - pos - 1));
+				std::swap(_currentStack.back(), _currentStack.at(pos));
+				cleanStackTop();
+			}
+		}
+	}
+	while(_currentStack.size() > _targetStack.size())
+	{
+		_pop();
+		_currentStack.pop_back();
+	}
+
+	std::cout << "CREATED STACK LAYOUT: " << OptimizedCodeTransform::stackToString(_currentStack) << std::endl;
+}
+
+void createStackLayout(Stack& _currentStack, Stack _targetStack, CodeGenerationContext& _context)
+{
+	createStackLayout(_currentStack, move(_targetStack), [&](unsigned _i) {
+		_context.assembly.appendInstruction(evmasm::swapInstruction(_i));
+	}, [&](unsigned _i) {
+		_context.assembly.appendInstruction(evmasm::dupInstruction(_i));
+	}, [&](StackSlot const& _slot) {
+		std::visit(util::GenericVisitor{
+			[&](LiteralSlot const &_literal)
+			{
+				_context.assembly.setSourceLocation(locationOf(_literal));
+				_context.assembly.appendConstant(_literal.value);
+				},
+				[&](ReturnLabelSlot const& _returnLabel)
+				{
+					yulAssert(_returnLabel.call, "Cannot produce function return label.");
+					if (!_context.returnLabels.count(_returnLabel.call))
+						_context.returnLabels[_returnLabel.call] = _context.assembly.newLabelId();
+					_context.assembly.appendLabelReference(_context.returnLabels.at(_returnLabel.call));
+				},
+				[&](auto const& _slot)
+				{
+					std::cout << "SLOT: " << OptimizedCodeTransform::stackSlotToString(StackSlot{_slot}) << std::endl;
+					yulAssert(false, "Slot not found.");
+				}
+		}, _slot);
+	}, [&]() { _context.assembly.appendInstruction(evmasm::Instruction::POP); });
+#if 0
 	// TODO: make resilient against duplicates.
 	if (_currentStack == _targetStack)
 		return;
 	std::cout << "CREATE STACK LAYOUT: " << OptimizedCodeTransform::stackToString(_targetStack) << " FROM " << OptimizedCodeTransform::stackToString(_currentStack) << std::endl;
-	shuffleStack(_currentStack, _targetStack | ranges::views::take(_currentStack.size()), [&](unsigned _i) {
-		_assembly.appendInstruction(evmasm::swapInstruction(_i));
-	}, [&]() { _assembly.appendInstruction(evmasm::Instruction::POP); });
-	for (auto const& newSlot: _targetStack | ranges::views::take_last(_targetStack.size() - _currentStack.size()))
+
+	auto cleanStackTop = [&]() {
+		while (!_currentStack.empty() && (holds_alternative<JunkSlot>(_currentStack.back()) || !util::findOffset(_targetStack, _currentStack.back())))
+		{
+			_assembly.appendInstruction(evmasm::Instruction::POP);
+			_currentStack.pop_back();
+		}
+	};
+	cleanStackTop();
+
+	for (auto&& [pos, slot]: _targetStack | ranges::views::enumerate)
 	{
-		if (auto offset = util::findOffset(_currentStack, newSlot))
-			_assembly.appendInstruction(evmasm::dupInstruction(static_cast<unsigned>(_currentStack.size() - *offset)));
+		std::cout << "Want " << OptimizedCodeTransform::stackSlotToString(slot) << " at " << pos << std::endl;
+		if (pos < _currentStack.size() && _currentStack.at(pos) == slot)
+		{
+			std::cout << "OK" << std::endl;
+			continue;
+		}
+		else if (auto depth = util::findOffset(_currentStack | ranges::views::reverse, slot))
+		{
+			std::cout << "At depth " << *depth << std::endl;
+			size_t offset = _currentStack.size() - *depth - 1;
+			if (offset < pos)
+			{
+				_assembly.appendInstruction(evmasm::dupInstruction(static_cast<unsigned>(*depth + 1)));
+				_currentStack.emplace_back(_currentStack.at(offset));
+
+				if (_currentStack.size() - pos - 1 > 0)
+				{
+					std::cout << "swap " << _currentStack.size() - pos - 1 << std::endl;
+					_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(_currentStack.size() - pos - 1)));
+					std::swap(_currentStack.back(), _currentStack.at(pos));
+					cleanStackTop();
+				}
+			}
+			else
+			{
+				if (*depth > 0)
+				{
+					std::cout << "swap up: " << *depth << std::endl;
+					_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(*depth)));
+					std::swap(_currentStack.back(), _currentStack.at(_currentStack.size() - *depth - 1));
+				}
+
+				if (_currentStack.size() - pos - 1 > 0)
+				{
+					std::cout << "swap " << _currentStack.size() - pos - 1 << std::endl;
+					_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(_currentStack.size() - pos - 1)));
+					std::swap(_currentStack.back(), _currentStack.at(pos));
+					cleanStackTop();
+				}
+			}
+		}
+		else if (auto const* literalSlot = get_if<LiteralSlot>(&slot))
+		{
+			std::cout << "Literal" << std::endl;
+			_assembly.setSourceLocation(locationOf(*literalSlot));
+			_assembly.appendConstant(literalSlot->value);
+			_currentStack.emplace_back(*literalSlot);
+			if (_currentStack.size() - pos - 1 > 0)
+			{
+				_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(_currentStack.size() - pos - 1)));
+				std::swap(_currentStack.back(), _currentStack.at(pos));
+				cleanStackTop();
+			}
+		}
 		else
 		{
-			auto const* literal = get_if<LiteralSlot>(&newSlot);
-			yulAssert(literal, "");
-			_assembly.setSourceLocation(locationOf(*literal));
-			_assembly.appendConstant(literal->value);
+			std::cout << "NOT FOUND! ENTERING PLACEHOLDER" << std::endl;
+			_assembly.appendConstant(u256(0xDEADBEEF));
+			_currentStack.emplace_back(slot);
+			if (_currentStack.size() - pos - 1 > 0)
+			{
+				_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(_currentStack.size() - pos - 1)));
+				std::swap(_currentStack.back(), _currentStack.at(pos));
+				cleanStackTop();
+			}
+			//yulAssert(false, "Not found.");
 		}
-		_currentStack.emplace_back(newSlot);
 	}
+	while(_currentStack.size() > _targetStack.size())
+	{
+		_currentStack.pop_back();
+		_assembly.appendInstruction(evmasm::Instruction::POP);
+	}
+
 	std::cout << "CREATED STACK LAYOUT: " << OptimizedCodeTransform::stackToString(_currentStack) << std::endl;
+#endif
 }
 }
 
@@ -126,53 +327,192 @@ void OptimizedCodeTransform::run(
 		codeTransform(*context.dfg->entry);
 	}
 
-	CodeGenerationContext generationContext{_assembly, _builtinContext, {}};
+	CodeGenerationContext generationContext{_assembly, _builtinContext, {}, {}};
 	for(auto& block: context.stagedBlocks)
 		for (auto const& generator: block.generators | ranges::views::reverse)
 			(*generator)(generationContext);
+}
 
-	/*
-	while (!context.stagedFunctions.empty())
+void OptimizedCodeTransform::operator()(DFG::FunctionCall const& _call)
+{
+	std::cout << "B: function call " << _call.functionCall->functionName.name.str() << ": " << stackToString(*m_stack) << std::endl;
+
+	stage([call = &_call, entryLabel = getFunctionLabel(*_call.function)](CodeGenerationContext& _context){
+		std::cout << "F: function call " << call->functionCall->functionName.name.str() << " pre: " << stackToString(_context.stack) << std::endl;
+		_context.assembly.setSourceLocation(locationOf(*call));
+		_context.assembly.appendJumpTo(
+			entryLabel,
+			static_cast<int>(call->function->returns.size() - call->function->arguments.size()) - 1,
+			AbstractAssembly::JumpType::IntoFunction
+		);
+		_context.assembly.appendLabel(_context.returnLabels.at(call->functionCall));
+		for (size_t i = 0; i < call->function->arguments.size() + 1; ++i)
+			_context.stack.pop_back();
+		for (size_t i = 0; i < call->function->returns.size(); ++i)
+			_context.stack.emplace_back(TemporarySlot{call->functionCall, i});
+		std::cout << "F: function call " << call->functionCall->functionName.name.str() << " post: " << stackToString(_context.stack) << std::endl;
+	});
+}
+
+void OptimizedCodeTransform::operator()(DFG::BuiltinCall const& _call)
+{
+	std::cout << "B: bultin call " << _call.functionCall->functionName.name.str() << ": " << stackToString(*m_stack) << std::endl;
+
+	stage([call = &_call](CodeGenerationContext& _context){
+		std::cout << "F: builtin call " << call->functionCall->functionName.name.str() << " pre: " << stackToString(_context.stack) << std::endl;
+		_context.assembly.setSourceLocation(locationOf(*call));
+		call->builtin->generateCode(*call->functionCall, _context.assembly, _context.builtinContext, [](auto&&){});
+		for (size_t i = 0; i < call->arguments; ++i)
+			_context.stack.pop_back();
+		for (size_t i = 0; i < call->builtin->returns.size(); ++i)
+			_context.stack.emplace_back(TemporarySlot{call->functionCall, i});
+		std::cout << "F: builtin call " << call->functionCall->functionName.name.str() << " post: " << stackToString(_context.stack) << std::endl;
+	});
+}
+
+void OptimizedCodeTransform::operator()(DFG::Assignment const& _assignment)
+{
+	std::cout << "B: assignment (";
+	for (auto var: _assignment.variables)
+		std::cout << var.variable->name.str() << " ";
+	std::cout << ") pre: " << stackToString(*m_stack) << std::endl;
+	stage([assignment = &_assignment](CodeGenerationContext& _context){
+		_context.assembly.setSourceLocation(locationOf(*assignment));
+		std::cout << "F: assign (";
+		for (auto var: assignment->variables)
+			std::cout << var.variable->name.str() << " ";
+		std::cout << ") pre: " << stackToString(_context.stack) << std::endl;
+
+		for(auto& currentSlot: _context.stack)
+			if (VariableSlot const* varSlot = get_if<VariableSlot>(&currentSlot))
+				if (util::findOffset(assignment->variables, *varSlot))
+					currentSlot = JunkSlot{};
+
+		for (auto&& [currentSlot, varSlot]: ranges::zip_view(_context.stack | ranges::views::take_last(assignment->variables.size()), assignment->variables))
+			currentSlot = varSlot;
+
+		std::cout << "F: assign (";
+		for (auto var: assignment->variables)
+			std::cout << var.variable->name.str() << " ";
+		std::cout << ") post: " << stackToString(_context.stack) << std::endl;	});
+}
+
+
+void OptimizedCodeTransform::operator()(DFG::Operation const& _operation)
+{
+	yulAssert(m_stack, "");
+
+	std::cout << "OPERATION post:   " << stackToString(*m_stack) << std::endl
+	          << "          input:  " << stackToString(_operation.input) << std::endl
+			  << "          output: " << stackToString(_operation.output) << std::endl;
+
+	vector<int> targetPositions(_operation.output.size(), -1);
+	size_t numToKeep = 0;
+	for (size_t idx: ranges::views::iota(0u, targetPositions.size()))
+		if (auto offset = util::findOffset(*m_stack, _operation.output.at(idx)))
+		{
+			targetPositions[idx] = static_cast<int>(*offset);
+			++numToKeep;
+		}
+
+	struct PreviousSlot { size_t slot; };
+	vector<variant<PreviousSlot, int>> layout;
+	// Before the call the desired stack (below the call arguments) has size m_stack->size() - numToKeep
+	for (size_t slot: ranges::views::iota(0u, m_stack->size() - numToKeep))
+		layout.emplace_back(PreviousSlot{slot});
+	// The call produces values with known target positions.
+	layout += targetPositions;
+
+	// TODO: argue that util::permute works with this kind of _getTargetPosition.
+	util::permute(static_cast<unsigned>(layout.size()), [&](unsigned _i) {
+		// For call return values the target position is known.
+		if (int* pos = get_if<int>(&layout.at(_i)))
+			return *pos;
+		// Previous arguments can stay where they are.
+		return static_cast<int>(_i);
+	}, [&](unsigned _i) {
+		stage([_i](CodeGenerationContext& _context) {
+			std::cout << "Staged SWAP" << _i << std::endl;
+			_context.assembly.appendInstruction(evmasm::swapInstruction(_i));
+			std::swap(_context.stack.back(), _context.stack.at(_context.stack.size() - _i - 1));
+		});
+		std::swap(layout.back(), layout[layout.size() - _i - 1]);
+	}, [&]() {
+		stage([](CodeGenerationContext& _context) {
+			std::cout << "Staged POP" << std::endl;
+			_context.assembly.appendInstruction(evmasm::Instruction::POP);
+			_context.stack.pop_back();
+		});
+		layout.pop_back();
+	});
+
+	// Now we can construct the ideal layout before the declaration.
+	// "layout" has the declared variables in the desired position and
+	// for any PreviousSlot{x}, x yields the ideal place of the slot before the declaration.
+	vector<optional<StackSlot>> idealLayout(m_stack->size() - numToKeep, nullopt);
+	for (auto const& [slot, idealPosition]: ranges::zip_view(*m_stack, layout))
+		if (PreviousSlot* previousSlot = std::get_if<PreviousSlot>(&idealPosition))
+			idealLayout.at(previousSlot->slot) = slot;
+
+	m_stack->resize(idealLayout.size());
+	for (auto&& [slot, idealSlot]: ranges::zip_view(*m_stack, idealLayout))
 	{
-		Scope::Function const* function = *context.stagedFunctions.begin();
-		context.stagedFunctions.pop_front();
-
-		DFG::FunctionInfo const& info = context.dfg->functions.at(function);
-		OptimizedCodeTransform codeTransform{
-			context,
-			_assembly,
-			_builtinContext,
-			_useNamedLabelsForFunctions
-		};
-		_assembly.setStackHeight(1 + static_cast<int>(info.parameters.size()));
-		_assembly.setSourceLocation(locationOf(info));
-		_assembly.appendLabel(context.functionEntries.at(function));
-		codeTransform.m_stack.emplace_back(ReturnLabelSlot{});
-		codeTransform.m_stack += info.parameters | ranges::views::transform([](DFG::Variable const& _var) -> StackSlot {
-			return VariableSlot{&_var};
-		});
-		codeTransform.m_unallocatedReturnVariables += info.returnVariables | ranges::views::transform([](DFG::Variable const& _var) {
-			return _var.variable;
-		});
-		std::cout << "[function " << function->name.str() << "]" << std::endl;
-		codeTransform(*info.entry);
-		for (auto const& returnVar: info.returnVariables) // TODO: order?
-			if (codeTransform.m_unallocatedReturnVariables.count(returnVar.variable))
-			{
-				_assembly.appendConstant(0);
-				codeTransform.m_stack.emplace_back(VariableSlot{&returnVar});
-			}
-		std::cout << "LAYOUT BEFORE: " << stackToString(codeTransform.m_stack) << std::endl;
-		vector<StackSlot> exitLayout = info.returnVariables | ranges::views::transform([](DFG::Variable const& _var) {
-			return VariableSlot{&_var};
-		}) | ranges::to<vector<StackSlot>>;
-		exitLayout.emplace_back(ReturnLabelSlot{});
-		codeTransform.shuffleStackTo(exitLayout);
-		std::cout << "LAYOUT AFTER: " << stackToString(codeTransform.m_stack) << std::endl;
-		std::cout << "[end function " << function->name.str() << "]" << std::endl;
-		_assembly.appendJump(-static_cast<int>(info.returnVariables.size()), AbstractAssembly::JumpType::OutOfFunction);
+		yulAssert(idealSlot.has_value(), "");
+		slot = *idealSlot;
 	}
-	 */
+
+	std::visit(*this, _operation.operation);
+
+	for (StackSlot const& input: _operation.input)
+		m_stack->emplace_back(input);
+
+	std::cout << "Operation pre before compress: " << stackToString(*m_stack) << std::endl;
+	for (auto&& [idx, slot]: *m_stack | ranges::views::enumerate | ranges::views::reverse)
+		if (auto const* literalSlot = std::get_if<LiteralSlot>(&slot))
+		{
+			m_stack->pop_back(); // TODO: verify that this is fine during range traversal
+			stage([literal = *literalSlot](CodeGenerationContext& _context) {
+				std::cout << "Compressed literal " << util::toCompactHexWithPrefix(literal.value) << std::endl;
+				_context.assembly.setSourceLocation(locationOf(literal));
+				_context.assembly.appendConstant(literal.value);
+				_context.stack.emplace_back(literal);
+			});
+		}
+		else if (auto const* returnLabelSlot = std::get_if<ReturnLabelSlot>(&slot))
+		{
+			if (returnLabelSlot->call)
+			{
+				m_stack->pop_back();
+				stage([returnLabel = *returnLabelSlot](CodeGenerationContext& _context) {
+					std::cout << "Compressed return label " << returnLabel.call->functionName.name.str() << std::endl;
+					if (!_context.returnLabels.count(returnLabel.call))
+						_context.returnLabels[returnLabel.call] = _context.assembly.newLabelId();
+					_context.assembly.appendLabelReference(_context.returnLabels.at(returnLabel.call));
+					_context.stack.emplace_back(returnLabel);
+				});
+			}
+			else
+				break;
+		}
+		else if (util::findOffset(*m_stack | ranges::views::take(idx), slot))
+		{
+			m_stack->pop_back();
+			stage([slot = slot](CodeGenerationContext& _context) {
+				std::cout << "Compressed dup " << stackSlotToString(slot) << std::endl;
+				auto offset = util::findOffset(_context.stack, slot);
+				yulAssert(offset, "");
+				_context.assembly.appendInstruction(evmasm::dupInstruction(static_cast<unsigned>(_context.stack.size() - *offset)));
+				_context.stack.emplace_back(slot);
+			});
+		}
+		else
+			break;
+	std::cout << "Operation pre after compress: " << stackToString(*m_stack) << "   " << m_stack << std::endl;
+
+	stage([stack = *m_stack, debug = m_stack](CodeGenerationContext& _context){
+		std::cout << "F: Recreate operation layout: " << stackToString(stack) << "   " << debug << std::endl;
+		createStackLayout(_context.stack, stack, _context);
+	});
 }
 
 void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
@@ -183,7 +523,14 @@ void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
 	m_context.blockInfos.emplace(&_block, *m_currentBlockInfo);
 
 	std::visit(util::GenericVisitor{
-		[](std::monostate) {},
+		[&](std::monostate)
+		{
+			stage([](CodeGenerationContext& _context) {
+				std::cout << "F: MAIN EXIT" << std::endl;
+				_context.assembly.appendInstruction(evmasm::Instruction::STOP);
+				_context.assembly.setStackHeight(0);
+			});
+		},
 		[&](DFG::BasicBlock::Jump const& _jump)
 		{
 			(*this)(*_jump.target);
@@ -200,10 +547,18 @@ void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
 		[&](DFG::BasicBlock::FunctionReturn const& _functionReturn)
 		{
 			yulAssert(_functionReturn.info, "");
-			m_currentBlockInfo->exitLayout = _functionReturn.info->returnVariables | ranges::views::transform([](DFG::Variable const& _var){
-				return VariableSlot{&_var};
+			m_currentBlockInfo->exitLayout = _functionReturn.info->returnVariables | ranges::views::transform([](auto const& _varSlot){
+				return StackSlot{_varSlot};
 			}) | ranges::to<Stack>;
 			m_currentBlockInfo->exitLayout.emplace_back(ReturnLabelSlot{});
+			stage([functionInfo = _functionReturn.info, exitLayout = m_currentBlockInfo->exitLayout](CodeGenerationContext& _context) {
+				std::cout << "Return from function " << functionInfo->function->name.str() << std::endl;
+				createStackLayout(_context.stack, exitLayout, _context);
+				_context.assembly.setSourceLocation(locationOf(*functionInfo));
+				_context.assembly.appendJump(0, AbstractAssembly::JumpType::OutOfFunction); // TODO: stack height diff.
+				_context.assembly.setStackHeight(0);
+				_context.stack.clear();
+			});
 		},
 		[](DFG::BasicBlock::Stop const&) { },
 		[](DFG::BasicBlock::Revert const&) { }
@@ -212,274 +567,14 @@ void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
 	m_currentBlockInfo->entryLayout = m_currentBlockInfo->exitLayout;
 	m_stack = &m_currentBlockInfo->entryLayout;
 
-	for(auto& statement: _block.statements | ranges::views::reverse)
-	{
-		std::visit(*this, statement);
-
-		std::cout << "B: before stack compression " << stackToString(*m_stack) << std::endl;
-		size_t notNeeded = 0;
-		for (auto&& [position, stackSlot]: (*m_stack | ranges::views::enumerate) | ranges::views::reverse)
-		{
-			auto offset = util::findOffset(*m_stack, stackSlot);
-			if ((offset && *offset < position) || holds_alternative<LiteralSlot>(stackSlot))
-				++notNeeded;
-			else
-				break;
-		}
-		stage([layout = *m_stack](CodeGenerationContext& _context) {
-			std::cout << "F statement preparation." << std::endl;
-			createStackLayout(_context.stack, layout, _context.assembly);
-		});
-		pop(notNeeded);
-		std::cout << "B: after stack compression " << stackToString(*m_stack) << std::endl;
-	}
-
-	stage([entryLayout = *m_stack](CodeGenerationContext& _context) {
-		std::cout << "F block: current layout: " << stackToString(_context.stack) << " wanted: " << stackToString(entryLayout) << std::endl;
-		createStackLayout(_context.stack, entryLayout, _context.assembly);
-		yulAssert(_context.stack == entryLayout, "");
-	});
-
-}
-
-void OptimizedCodeTransform::operator()(DFG::Declaration const& _declaration)
-{
-	std::cout << "B declaration ";
-	for (auto const& v: _declaration.variables)
-		std::cout << v.variable->name.str() << " ";
-	std::cout << " pre: " << stackToString(*m_stack) << std::endl;
-	// Determine the target positions of each declared variable and count the number of variables to be kept.
-	// auto& targetPositions = _declaration.targetPositions.emplace(vector<int>(_declaration.variables.size(), -1));
-	vector<int> targetPositions(_declaration.variables.size(), -1);
-	size_t numToKeep = 0;
-	for (auto&& [i, var]: _declaration.variables | ranges::views::enumerate)
-		if (auto targetPosition = util::findOffset(*m_stack, StackSlot{VariableSlot{&var}}))
-		{
-			std::cout << "B: decl: KEEP: " << var.variable->name.str() << " " << i << " -> " << *targetPosition << std::endl;
-			targetPositions[i] = static_cast<int>(*targetPosition);
-			++numToKeep;
-		}
-
-	struct PreviousSlot { size_t x; };
-	vector<std::variant<PreviousSlot, int>> layout;
-	// Before the declaration the stack has size m_currentStack->size() - numToKeep
-	for(size_t i = 0; i < m_stack->size() - numToKeep; ++i)
-		layout.emplace_back(PreviousSlot{i});
-	// Evaluating the declaration value adds variables with known target positions.
-	layout += targetPositions;
-
-	std::cout << "Layout: ";
-	for (auto x: layout)
-	{
-		std::visit(util::GenericVisitor{
-			[](PreviousSlot y) { std::cout << "P(" << y.x << ") "; },
-			[](int y) { std::cout << y << " "; }
-		}, x);
-	}
-	std::cout << std::endl;
-
-	// Create a permutation of the declared variables to their target positions.
-	// Previous variables are assumed to be already in place.
-	std::vector<evmasm::Instruction> instructions;
-	util::permute(static_cast<unsigned>(layout.size()), [&](unsigned _i) {
-		if (int* x = get_if<int>(&layout.at(_i)))
-			return *x;
-		return static_cast<int>(_i);
-	}, [&](unsigned _i) {
-		std::cout << "B decl SWAP" << _i << std::endl;
-		instructions.emplace_back(evmasm::swapInstruction(_i));
-		std::swap(layout.back(), layout[layout.size() - _i - 1]);
-	}, [&]() { std::cout << "B decl POP" << std::endl; layout.pop_back(); instructions.emplace_back(evmasm::Instruction::POP); });
-	stage([declaration = &_declaration, instructions = std::move(instructions)](CodeGenerationContext& _context) {
-		std::cout << "F: Before declare: " << stackToString(_context.stack) << std::endl;
-		for (auto&& [slot, var]: ranges::zip_view(_context.stack | ranges::views::take_last(declaration->variables.size()), declaration->variables))
-			slot = VariableSlot{&var};
-		std::cout << "F: After initial assign: " << stackToString(_context.stack) << std::endl;
-		for (auto instruction: instructions)
-		{
-			_context.assembly.appendInstruction(instruction);
-			if (instruction == evmasm::Instruction::POP)
-				_context.stack.pop_back();
-			else
-				std::swap(_context.stack.back(), _context.stack.at(_context.stack.size() - evmasm::getSwapNumber(instruction)));
-		}
-		std::cout << "F: After swapping: " << stackToString(_context.stack) << std::endl;
-	});
-
-	// Now we can construct the ideal layout before the declaration.
-	// "layout" has the declared variables in the desired position and
-	// for any PreviousSlot{x}, x yields the ideal place of the slot before the declaration.
-	vector<optional<StackSlot>> idealLayout(m_stack->size() - numToKeep, nullopt);
-	for (auto const& [slot, idealPosition]: ranges::zip_view(*m_stack, layout))
-		if (PreviousSlot* previousSlot = std::get_if<PreviousSlot>(&idealPosition))
-			idealLayout.at(previousSlot->x) = slot;
-
-	m_stack->resize(idealLayout.size());
-	for (auto&& [slot, idealSlot]: ranges::zip_view(*m_stack, idealLayout))
-	{
-		yulAssert(idealSlot.has_value(), "");
-		slot = *idealSlot;
-	}
-
-	if (_declaration.value)
-		std::visit(*this, *_declaration.value);
-
-
-	std::cout << "B declaration ";
-	for (auto const& v: _declaration.variables)
-		std::cout << v.variable->name.str() << " ";
-	std::cout << " post: " << stackToString(*m_stack) << std::endl;
-
-}
-
-void OptimizedCodeTransform::operator()(DFG::Assignment const& _assignment)
-{
-	std::visit(*this, _assignment.value);
-
-	/*
-	m_assembly.setSourceLocation(locationOf(_assignment));
-	for(DFG::Variable const& var: _assignment.variables | ranges::views::reverse)
-		if (m_unallocatedReturnVariables.count(var.variable))
-		{
-			m_assembly.appendConstant(0);
-			m_stack.push_back(VariableSlot{&var});
-			m_unallocatedReturnVariables.erase(var.variable);
-		}
-
-	std::cout << " before assign: " << stackToString(m_stack) << std::endl;
-
-	std::visit(*this, _assignment.value);
-	for(DFG::Variable const& var: _assignment.variables | ranges::views::reverse)
-	{
-		auto depth = variableStackDepth(var);
-		if (depth)
-			m_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(*depth)));
-		m_assembly.appendInstruction(evmasm::Instruction::POP);
-		m_stack.pop_back();
-	}
-
-	std::cout << " after assign: " << stackToString(m_stack) << std::endl;
-	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
-	*/
-}
-
-void OptimizedCodeTransform::operator()(DFG::ExpressionStatement const& _stmt)
-{
-	std::visit(*this, _stmt.expression);
-	stage([loc = locationOf(_stmt)](CodeGenerationContext const& _context) {
-		std::cout << "F: Expr stmt pre: " << stackToString(_context.stack) << std::endl;
-		_context.assembly.setSourceLocation(loc);
-	});
-	/*
-	m_assembly.setSourceLocation(locationOf(_stmt));
-	std::visit(util::GenericVisitor{
-		[&](DFG::FunctionCall const& _call) {
-			size_t stackHeightBefore = m_stack.size();
-			(*this)(_call);
-			yulAssert(stackHeightBefore == m_stack.size(), "");
-		},
-		[&](DFG::BuiltinCall const& _call) {
-			yulAssert(_call.returns == 0, "");
-			size_t stackHeightBefore = m_stack.size();
-			(*this)(_call);
-			yulAssert(stackHeightBefore == m_stack.size(), "");
-		},
-		[&](auto const&) { yulAssert(false, "Expected function or builtin call."); }
-	}, _stmt.expression);
-	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
-	 */
-}
-
-void OptimizedCodeTransform::operator()(DFG::BuiltinCall const& _call)
-{
-	stage([call = &_call](CodeGenerationContext& _context) {
-		std::cout << "F: Builtin call " << call->functionCall->functionName.name.str() << " pre: " << stackToString(_context.stack) << std::endl;
-		_context.assembly.setSourceLocation(locationOf(*call));
-		call->builtin->generateCode(*call->functionCall, _context.assembly, _context.builtinContext, [](auto&&){});
-		for (size_t i = 0; i < call->arguments.size(); ++i)
-			_context.stack.pop_back();
-		for (size_t i = 0; i < call->returns; ++i)
-			_context.stack.emplace_back(TemporarySlot{call, i});
-		std::cout << "F: Builtin call " << call->functionCall->functionName.name.str() << " post: " << stackToString(_context.stack) << std::endl;
-	});
-
-	std::cout << "B: Builtin call " << _call.functionCall->functionName.name.str() << " post: " << stackToString(*m_stack) << std::endl;
-
-	for(auto& argument: _call.arguments)
-		std::visit(*this, argument);
-
-	/*stage([requiredStackTop = *m_stack | ranges::views::take(_call.arguments.size()) | ranges::to<Stack>](CodeGenerationContext& _context) {
-		std::cout << "F: verify stack " << stackToString(_context.stack) << " has top " << stackToString(requiredStackTop) << std::endl;
-		// TODO: better ranges equality comparsion.
-		yulAssert((_context.stack | ranges::views::take_last(requiredStackTop.size()) | ranges::to<Stack>) == requiredStackTop, "");
-	});*/
-
-	std::cout << "B: Builtin call " << _call.functionCall->functionName.name.str() << " pre: " << stackToString(*m_stack) << std::endl;
-
-	/*
-	m_assembly.setSourceLocation(locationOf(_builtinCall));
-
-	for(auto const& argument: _builtinCall.arguments | ranges::views::reverse)
-		std::visit(*this, argument);
-
-	std::cout << _builtinCall.functionCall->functionName.name.str() << "  " << stackToString(m_stack) << std::endl;
-
-	_builtinCall.builtin->generateCode(*_builtinCall.functionCall, m_assembly, m_builtinContext, [](auto&&){});
-	pop(_builtinCall.arguments.size());
-	for (size_t i = 0; i < _builtinCall.builtin->returns.size(); ++i)
-		m_stack.emplace_back(TemporarySlot{&_builtinCall, i});
-
-	std::cout << "  => " << stackToString(m_stack) << std::endl;
-	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
-	 */
-}
-
-void OptimizedCodeTransform::operator()(DFG::FunctionCall const&)
-{
-	/*
-	m_assembly.setSourceLocation(locationOf(_functionCall));
-	AbstractAssembly::LabelID label = m_assembly.newLabelId();
-	m_assembly.appendLabelReference(label);
-	m_stack.emplace_back(ReturnLabelSlot{&_functionCall});
-
-	for(auto const& argument: _functionCall.arguments | ranges::views::reverse)
-		std::visit(*this, argument);
-
-	std::cout << _functionCall.function->name.str() << "  " << stackToString(m_stack) << std::endl;
-
-	m_assembly.appendJumpTo(
-		getFunctionLabel(*_functionCall.function),
-		static_cast<int>(_functionCall.function->returns.size() - _functionCall.function->arguments.size()) - 1,
-		AbstractAssembly::JumpType::IntoFunction
-	);
-	m_assembly.appendLabel(label);
-	pop(_functionCall.arguments.size() + 1);
-	for (size_t i = 0; i < _functionCall.function->returns.size(); ++i)
-		m_stack.emplace_back(TemporarySlot{&_functionCall, i});
-
-	std::cout << "  => " << stackToString(m_stack) << std::endl;
-	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
-	 */
-}
-
-void OptimizedCodeTransform::operator()(DFG::Literal const& _literal)
-{
-	std::cout << "B: literal post " << stackToString(*m_stack) << std::endl;
-	m_stack->emplace_back(LiteralSlot{_literal.value, _literal.debugData});
-	std::cout << "B: literal pre " << stackToString(*m_stack) << std::endl;
-}
-
-void OptimizedCodeTransform::operator()(DFG::Variable const& _variable)
-{
-	std::cout << "B: variable " << _variable.variable->name.str() << " post " << stackToString(*m_stack) << std::endl;
-//	auto offset = util::findOffset(*m_stack, StackSlot{VariableSlot{&_variable}});
-
-	m_stack->emplace_back(VariableSlot{&_variable});
-	std::cout << "B: variable " << _variable.variable->name.str() << " pre " << stackToString(*m_stack) << std::endl;
+	for(auto& operation: _block.operations | ranges::views::reverse)
+		(*this)(operation);
 }
 
 AbstractAssembly::LabelID OptimizedCodeTransform::getFunctionLabel(Scope::Function const& _function)
 {
+	ScopedSaveAndRestore restoreStack(m_stack, nullptr);
+	ScopedSaveAndRestore restoreBlockInfo(m_currentBlockInfo, nullptr);
 	DFG::FunctionInfo const& functionInfo = m_context.dfg->functions.at(&_function);
 	(*this)(functionInfo);
 	auto label = m_context.blockInfos.at(functionInfo.entry).label;
@@ -503,97 +598,28 @@ void OptimizedCodeTransform::operator()(DFG::FunctionInfo const& _functionInfo)
 			{}
 		) : m_assembly.newLabelId();
 
-
-	yulAssert(false, "TODO");
-}
-
-void OptimizedCodeTransform::shuffleStackTo(std::vector<StackSlot> const&)
-{
-	yulAssert(false, "");
-
-	/*
-	std::cout << "SHUFFLE " << stackToString(m_stack) << std::endl;
-	std::cout << "     TO " << stackToString(_target) << std::endl;
-	auto matches = util::GenericVisitor{
-		[](ReturnLabelSlot const& _r1, ReturnLabelSlot const& _r2) {
-			return _r1.call == _r2.call;
-		},
-		[](VariableSlot const& _v1, VariableSlot const& _v2) {
-			return _v1.variable->variable == _v2.variable->variable;
-		},
-		[](LiteralSlot const& _l1, LiteralSlot const& _l2) {
-			return _l1.value == _l2.value;
-		},
-		[](auto const&, auto const&) { return false; }
-	};
-	auto findSlot = [&](StackSlot const& _target) -> optional<size_t> {
-		for (auto&& [pos, slot]: ranges::views::enumerate(m_stack))
-			if (std::visit(matches, _target, slot))
-				return pos;
-		return nullopt;
-	};
-
-	std::vector<int> targetPositions(m_stack.size(), -1);
-	{
-		std::vector<int> added;
-		for (auto&& [targetPosition, slot]: (_target | ranges::views::enumerate) | ranges::views::reverse)
-			if (auto currentPosition = findSlot(slot))
-				targetPositions.at(*currentPosition) = static_cast<int>(targetPosition);
-			else
-			{
-				std::visit(util::GenericVisitor{
-					[&](LiteralSlot const& _l)
-					{
-						m_stack.emplace_back(_l);
-						m_assembly.appendConstant(_l.value);
-					},
-					[&](VariableSlot const& _l)
-					{
-						if (m_unallocatedReturnVariables.count(_l.variable->variable))
-						{
-							m_stack.emplace_back(_l);
-							m_assembly.appendConstant(0);
-							m_unallocatedReturnVariables.erase(_l.variable->variable);
-						}
-						else
-							yulAssert(false, "");
-					},
-					[](auto const&) { yulAssert(false, ""); }
-				}, slot);
-				added.emplace_back(targetPosition);
-			}
-		targetPositions += move(added);
-	}
-
-	std::cout << "   after adding literals: " << stackToString(m_stack) << std::endl;
-	std::cout << "   target positions: ";
-	for(auto x: targetPositions) std::cout << x << " ";
-	std::cout << std::endl;
-
-
-	yulAssert(m_stack.size() >= _target.size(), "");
-
-	util::permute(static_cast<unsigned>(targetPositions.size()), [&](unsigned _idx) { return targetPositions.at(_idx); }, [&](unsigned _depth) {
-		std::swap(targetPositions.back(), targetPositions.at(targetPositions.size() - _depth - 1));
-		std::swap(m_stack.back(), m_stack.at(m_stack.size() - _depth - 1));
-		m_assembly.appendInstruction(evmasm::swapInstruction(_depth));
-	}, [&]() {
-		targetPositions.pop_back();
-		m_stack.pop_back();
-		m_assembly.appendInstruction(evmasm::Instruction::POP);
+	stage([functionInfo = &_functionInfo, entryLabel = *info.label](CodeGenerationContext& _context){
+		std::cout << "F: start of function " << functionInfo->function->name.str() << std::endl;
+		_context.stack.clear();
+		_context.stack.emplace_back(ReturnLabelSlot{});
+		for (auto const& param: functionInfo->parameters)
+			_context.stack.emplace_back(param);
+		_context.assembly.setStackHeight(static_cast<int>(_context.stack.size()));
+		_context.assembly.setSourceLocation(locationOf(*functionInfo));
+		_context.assembly.appendLabel(entryLabel);
 	});
 
-	yulAssert(static_cast<int>(m_stack.size()) == m_assembly.stackHeight(), "Stack height mismatch.");
-	 */
+	std::cout << "Function entry stack: " << stackToString(*m_stack) << std::endl;
 }
 
 string OptimizedCodeTransform::stackSlotToString(StackSlot const& _slot)
 {
 	return std::visit(util::GenericVisitor{
-		[](ReturnLabelSlot const&) -> string { return "RET"; },
-		[](VariableSlot const& _var) { return _var.variable->variable->name.str() + "(" + to_string(intptr_t(_var.variable->variable)) + ")"; },
+		[](ReturnLabelSlot const& _ret) -> string { return "RET[" + (_ret.call ? _ret.call->functionName.name.str() : "") + "]"; },
+		[](VariableSlot const& _var) { return _var.variable->name.str(); },
 		[](LiteralSlot const& _lit) { return util::toCompactHexWithPrefix(_lit.value); },
-		[](TemporarySlot const&) -> string { return "TMP"; }
+		[](TemporarySlot const&) -> string { return "TMP"; },
+		[](JunkSlot const&) -> string { return "JUNK"; }
 	}, _slot);
 }
 
@@ -612,7 +638,7 @@ Stack OptimizedCodeTransform::combineStack(Stack const& _stack1, Stack const& _s
 	std::set<StackSlot> slotSet;
 	slotSet += _stack1;
 	slotSet += _stack2;
-	std::vector<StackSlot> candidate(slotSet.begin(), slotSet.end());
+	Stack candidate(slotSet.begin(), slotSet.end());
 	std::map<Stack, size_t> requiredSwaps;
 
 	auto evaluate = [&](Stack const& _candidate) -> size_t {
