@@ -333,10 +333,10 @@ void OptimizedCodeTransform::run(
 		for (auto const& entry: _block.entries)
 		{
 			BlockGenerationInfo& entryInfo = context.blockInfos.at(entry);
-			std::cout << " F: EXIT LAYOUT OF ENTRY: " << stackToString(entryInfo.exitLayout) << std::endl;
+			std::cout << " F: EXIT LAYOUT OF ENTRY: " << stackToString(*entryInfo.exitLayout) << std::endl;
 		}
 
-		generationContext.stack = info.entryLayout;
+		generationContext.stack = *info.entryLayout;
 		generationContext.assembly.setStackHeight(static_cast<int>(generationContext.stack.size()));
 		std::cout << "F: ASSUMED ENTRY LAYOUT: " << stackToString(generationContext.stack) << std::endl;
 
@@ -345,7 +345,7 @@ void OptimizedCodeTransform::run(
 			(*generator)(generationContext);
 
 		std::cout << std::endl << std::endl;
-		std::cout << "F: EXIT LAYOUT (" << &_block << "): " << stackToString(info.exitLayout) << " == " << stackToString(generationContext.stack) << std::endl;
+		std::cout << "F: EXIT LAYOUT (" << &_block << "): " << stackToString(*info.exitLayout) << " == " << stackToString(generationContext.stack) << std::endl;
 		yulAssert(info.exitLayout == generationContext.stack, "");
 
 		std::visit(util::GenericVisitor{
@@ -359,8 +359,8 @@ void OptimizedCodeTransform::run(
 				std::cout << "F: JUMP EXIT TO: " << _jump.target << std::endl;
 
 				BlockGenerationInfo& targetInfo = context.blockInfos.at(_jump.target);
-				std::cout << "F: CURRENT " << stackToString(generationContext.stack) << " => " << stackToString(targetInfo.entryLayout) << std::endl;
-				createStackLayout(generationContext.stack, targetInfo.entryLayout, generationContext);
+				std::cout << "F: CURRENT " << stackToString(generationContext.stack) << " => " << stackToString(*targetInfo.entryLayout) << std::endl;
+				createStackLayout(generationContext.stack, *targetInfo.entryLayout, generationContext);
 
 				if (!targetInfo.label && _jump.target->entries.size() == 1)
 					_recurse(*_jump.target, _recurse);
@@ -380,8 +380,20 @@ void OptimizedCodeTransform::run(
 				std::cout << "F: CONDITIONAL JUMP EXIT TO: " << _conditionalJump.nonZero << " / " << _conditionalJump.zero << std::endl;
 				BlockGenerationInfo& nonZeroInfo = context.blockInfos.at(_conditionalJump.nonZero);
 				BlockGenerationInfo& zeroInfo = context.blockInfos.at(_conditionalJump.zero);
-				std::cout << "F: non-zero entry layout: " << stackToString(nonZeroInfo.entryLayout) << std::endl;
-				std::cout << "F: zero entry layout: " << stackToString(zeroInfo.entryLayout) << std::endl;
+				std::cout << "F: non-zero entry layout: " << stackToString(*nonZeroInfo.entryLayout) << std::endl;
+				std::cout << "F: zero entry layout: " << stackToString(*zeroInfo.entryLayout) << std::endl;
+
+				for (auto const* nonZeroEntry: _conditionalJump.nonZero->entries)
+				{
+					BlockGenerationInfo& entryInfo = context.blockInfos.at(nonZeroEntry);
+					std::cout << "  F: non-zero entry exit: " << stackToString(*entryInfo.exitLayout) << std::endl;
+				}
+				for (auto const* zeroEntry: _conditionalJump.zero->entries)
+				{
+					BlockGenerationInfo& entryInfo = context.blockInfos.at(zeroEntry);
+					std::cout << "  F: zero entry exit: " << stackToString(*entryInfo.exitLayout) << std::endl;
+				}
+
 				yulAssert(nonZeroInfo.entryLayout == zeroInfo.entryLayout, "");
 				yulAssert((generationContext.stack | ranges::views::drop_last(1) | ranges::to<Stack>) == nonZeroInfo.entryLayout, "");
 
@@ -626,16 +638,22 @@ void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
 	ScopedSaveAndRestore stackRestore(m_stack, nullptr);
 	m_context.blockInfos.emplace(&_block, *m_currentBlockInfo);
 
+	Stack currentStack;
+
 	std::cout << "B: BLOCK: " << &_block << std::endl;
 	{
 		std::visit(util::GenericVisitor{
 			[&](std::monostate)
 			{
+				m_currentBlockInfo->exitLayout = currentStack;
 			},
 			[&](DFG::BasicBlock::Jump const& _jump)
 			{
 				(*this)(*_jump.target);
-				m_currentBlockInfo->exitLayout = m_context.blockInfos.at(_jump.target).entryLayout;
+				BlockGenerationInfo& targetInfo = m_context.blockInfos.at(_jump.target);
+				yulAssert(targetInfo.entryLayout.has_value(), "");
+				currentStack = *targetInfo.entryLayout;
+				m_currentBlockInfo->exitLayout = currentStack;
 			},
 			[&](DFG::BasicBlock::ConditionalJump const& _conditionalJump)
 			{
@@ -643,17 +661,20 @@ void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
 				auto& zeroInfo = m_context.blockInfos.at(_conditionalJump.zero);
 				(*this)(*_conditionalJump.nonZero);
 				auto& nonZeroInfo = m_context.blockInfos.at(_conditionalJump.nonZero);
-				m_currentBlockInfo->exitLayout = combineStack(zeroInfo.entryLayout, nonZeroInfo.entryLayout);
-				m_currentBlockInfo->exitLayout.emplace_back(_conditionalJump.condition);
+				yulAssert(zeroInfo.entryLayout.has_value() && nonZeroInfo.entryLayout.has_value(), "");
+				currentStack = combineStack(*zeroInfo.entryLayout, *nonZeroInfo.entryLayout);
+				m_currentBlockInfo->exitLayout = currentStack;
+				currentStack.emplace_back(_conditionalJump.condition);
 			},
 			[&](DFG::BasicBlock::FunctionReturn const& _functionReturn)
 			{
 				yulAssert(_functionReturn.info, "");
-				m_currentBlockInfo->exitLayout = _functionReturn.info->returnVariables | ranges::views::transform([](auto const& _varSlot){
+				currentStack = _functionReturn.info->returnVariables | ranges::views::transform([](auto const& _varSlot){
 					return StackSlot{_varSlot};
 				}) | ranges::to<Stack>;
-				m_currentBlockInfo->exitLayout.emplace_back(ReturnLabelSlot{});
-				stage([functionInfo = _functionReturn.info, exitLayout = m_currentBlockInfo->exitLayout](CodeGenerationContext& _context) {
+				currentStack.emplace_back(ReturnLabelSlot{});
+				m_currentBlockInfo->exitLayout = currentStack;
+				stage([functionInfo = _functionReturn.info, exitLayout = currentStack](CodeGenerationContext& _context) {
 					std::cout << "Return from function " << functionInfo->function->name.str() << std::endl;
 					createStackLayout(_context.stack, exitLayout, _context);
 					_context.assembly.setSourceLocation(locationOf(*functionInfo));
@@ -667,23 +688,24 @@ void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
 		}, _block.exit);
 	}
 
-	m_currentBlockInfo->entryLayout = m_currentBlockInfo->exitLayout;
-	m_stack = &m_currentBlockInfo->entryLayout;
+	m_stack = &currentStack;
 
-	std::cout << "B: EXIT LAYOUT (" << &_block << "): " << stackToString(m_currentBlockInfo->exitLayout) << std::endl;
+	std::cout << "B: EXIT LAYOUT (" << &_block << "): " << stackToString(currentStack) << std::endl;
 
 	for(auto& operation: _block.operations | ranges::views::reverse)
 		(*this)(operation);
 
-	std::cout << "B: ENTRY LAYOUT (" << &_block << "): " << stackToString(m_currentBlockInfo->entryLayout) << std::endl;
+	std::cout << "B: ENTRY LAYOUT (" << &_block << "): " << stackToString(currentStack) << std::endl;
 
-	stage([layout = m_currentBlockInfo->entryLayout, block = &_block](CodeGenerationContext& _context){
+	stage([layout = currentStack, block = &_block](CodeGenerationContext& _context){
 		// TODO: source location.
 		std::cout << "F: set block entry layout: " << stackToString(layout) << " (" << block << ")" << std::endl;
 		std::cout << "Layout now: " << stackToString(_context.stack) << " wanted: " << stackToString(layout) << std::endl;
 		createStackLayout(_context.stack, layout, _context);
 	});
 
+	m_currentBlockInfo->entryLayout = currentStack;
+/*
 	for (auto const& entry: _block.entries)
 		(*this)(*entry);
 	std::cout << "B: NUM ENTRIES TO (" << &_block << "): " << _block.entries.size() << std::endl;
@@ -692,6 +714,7 @@ void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
 		BlockGenerationInfo& entryInfo = m_context.blockInfos.at(entry);
 		std::cout << "B: ENTRY TO (" << &_block << ") FROM: " << entry << " (" << stackToString(entryInfo.exitLayout) << ")" << std::endl;
 	}
+ */
 }
 
 AbstractAssembly::LabelID OptimizedCodeTransform::getFunctionLabel(Scope::Function const& _function)

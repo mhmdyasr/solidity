@@ -58,8 +58,8 @@ struct BlockGenerationInfo {
 	DFG::BasicBlock const* block = nullptr;
 	std::vector<std::unique_ptr<BlockGenerator>> generators{};
 	std::optional<AbstractAssembly::LabelID> label{};
-	Stack entryLayout{};
-	Stack exitLayout{};
+	std::optional<Stack> entryLayout{};
+	std::optional<Stack> exitLayout{};
 };
 struct OptimizedCodeTransformContext
 {
