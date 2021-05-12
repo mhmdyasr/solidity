@@ -298,6 +298,7 @@ public:
 			OptimizedCodeTransformContext::OperationInfo const& operationInfo = m_info.operationStacks.at(&operation);
 			createStackLayout(m_stack, operationInfo.entryStack);
 			std::visit(*this, operation.operation);
+			// TODO: is this actually necessary each time? Last time is probably enough, if at all needed.
 			createStackLayout(m_stack, operationInfo.exitStack);
 		}
 
@@ -506,7 +507,10 @@ void OptimizedCodeTransform::operator()(DFG::FunctionCall const& _call)
 {
 	std::cout << "B: function call " << _call.functionCall->functionName.name.str() << ": " << stackToString(*m_stack) << std::endl;
 
-	getFunctionLabel(*_call.function); // TODO
+	ScopedSaveAndRestore restoreStack(m_stack, nullptr);
+	ScopedSaveAndRestore restoreBlockInfo(m_currentBlockInfo, nullptr);
+	DFG::FunctionInfo const& functionInfo = m_context.dfg->functions.at(_call.function);
+	(*this)(*functionInfo.entry);
 }
 
 void OptimizedCodeTransform::operator()(DFG::BuiltinCall const& _call)
@@ -668,6 +672,7 @@ void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
 			},
 			[&](DFG::BasicBlock::FunctionReturn const& _functionReturn)
 			{
+				// TODO: probably not needed here.
 				yulAssert(_functionReturn.info, "");
 				currentStack = _functionReturn.info->returnVariables | ranges::views::transform([](auto const& _varSlot){
 					return StackSlot{_varSlot};
@@ -690,34 +695,6 @@ void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
 	std::cout << "B: ENTRY LAYOUT (" << &_block << "): " << stackToString(currentStack) << std::endl;
 
 	m_currentBlockInfo->entryLayout = currentStack;
-}
-
-AbstractAssembly::LabelID OptimizedCodeTransform::getFunctionLabel(Scope::Function const& _function)
-{
-	ScopedSaveAndRestore restoreStack(m_stack, nullptr);
-	ScopedSaveAndRestore restoreBlockInfo(m_currentBlockInfo, nullptr);
-	DFG::FunctionInfo const& functionInfo = m_context.dfg->functions.at(&_function);
-	(*this)(functionInfo);
-	auto label = m_context.blockInfos.at(functionInfo.entry).label;
-	yulAssert(label.has_value(), "");
-	return *label;
-}
-
-void OptimizedCodeTransform::operator()(DFG::FunctionInfo const& _functionInfo)
-{
-	if (m_context.blockInfos.count(_functionInfo.entry))
-		return;
-
-	(*this)(*_functionInfo.entry);
-	BlockGenerationInfo& info = m_context.blockInfos.at(_functionInfo.entry);
-
-	info.label = m_useNamedLabelsForFunctions ?
-		m_assembly.namedLabel(
-			_functionInfo.function->name.str(),
-			_functionInfo.function->arguments.size(),
-			_functionInfo.function->returns.size(),
-			{}
-		) : m_assembly.newLabelId();
 }
 
 string OptimizedCodeTransform::stackSlotToString(StackSlot const& _slot)

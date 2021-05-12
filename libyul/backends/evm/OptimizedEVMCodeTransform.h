@@ -40,20 +40,6 @@ namespace solidity::yul
 {
 struct AsmAnalysisInfo;
 
-struct CodeGenerationContext
-{
-	AbstractAssembly& assembly;
-	BuiltinContext& builtinContext;
-	Stack stack;
-	std::map<yul::FunctionCall const*, AbstractAssembly::LabelID> returnLabels;
-};
-
-struct BlockGenerator
-{
-	virtual ~BlockGenerator() {}
-	virtual void operator()(CodeGenerationContext& _context) const = 0;
-};
-
 struct BlockGenerationInfo {
 	DFG::BasicBlock const* block = nullptr;
 	std::optional<AbstractAssembly::LabelID> label{};
@@ -94,14 +80,10 @@ public:
 	void operator()(DFG::FunctionCall const& _functionCall);
 	void operator()(DFG::Assignment const& _literal);
 
-	void operator()(DFG::FunctionInfo const& _functionInfo);
-
 private:
 	OptimizedCodeTransform(OptimizedCodeTransformContext& _context, AbstractAssembly& _assembly, BuiltinContext& _builtinContext, bool _useNamedLabelsForFunctions);
 
 	void visit(DFG::BasicBlock const& _block);
-
-	AbstractAssembly::LabelID getFunctionLabel(Scope::Function const& _function);
 
 	OptimizedCodeTransformContext& m_context;
 	AbstractAssembly& m_assembly;
@@ -111,14 +93,6 @@ private:
 	BlockGenerationInfo* m_currentBlockInfo;
 	Stack* m_stack;
 
-	void pop(size_t _amount = 1)
-	{
-		yulAssert(m_stack->size() >= _amount, "");
-		while (_amount--)
-			m_stack->pop_back();
-	}
-
-	void compressStack();
 	Stack combineStack(Stack const& _stack1, Stack const& _stack2);
 
 	// Debugging.
