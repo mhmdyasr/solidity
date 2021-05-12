@@ -172,15 +172,15 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 class CodeGenerator
 {
 public:
-	static void run(AbstractAssembly& _assembly, BuiltinContext& _builtinContext, OptimizedCodeTransformContext const& _info, DFG::BasicBlock const& _entry)
+	static void run(AbstractAssembly& _assembly, BuiltinContext& _builtinContext, bool _useNamedLabelsForFunctions, OptimizedCodeTransformContext const& _info, DFG::BasicBlock const& _entry)
 	{
-		CodeGenerator generator(_assembly, _builtinContext, _info);
+		CodeGenerator generator(_assembly, _builtinContext, _useNamedLabelsForFunctions,  _info);
 		generator(_entry);
 		generator.generateStagedFunctions();
 	}
 private:
-	CodeGenerator(AbstractAssembly& _assembly, BuiltinContext& _builtinContext, OptimizedCodeTransformContext const& _info):
-	m_assembly(_assembly), m_builtinContext(_builtinContext), m_info(_info) {}
+	CodeGenerator(AbstractAssembly& _assembly, BuiltinContext& _builtinContext, bool _useNamedLabelsForFunctions, OptimizedCodeTransformContext const& _info):
+	m_assembly(_assembly), m_builtinContext(_builtinContext), m_useNamedLabelsForFunctions(_useNamedLabelsForFunctions), m_info(_info) {}
 public:
 
 	AbstractAssembly::LabelID getFunctionLabel(Scope::Function const& _function)
@@ -188,13 +188,14 @@ public:
 		ScopedSaveAndRestore restoreStack(m_stack, {});
 		DFG::FunctionInfo const& functionInfo = m_info.dfg->functions.at(&_function);
 		BlockGenerationInfo& info = m_info.blockInfos.at(functionInfo.entry);
-		info.label = m_useNamedLabelsForFunctions ?
-			m_assembly.namedLabel(
-				functionInfo.function->name.str(),
-				functionInfo.function->arguments.size(),
-				functionInfo.function->returns.size(),
-				{}
-			) : m_assembly.newLabelId();
+		if (!info.label)
+			info.label = m_useNamedLabelsForFunctions ?
+				m_assembly.namedLabel(
+					functionInfo.function->name.str(),
+					functionInfo.function->arguments.size(),
+					functionInfo.function->returns.size(),
+					{}
+				) : m_assembly.newLabelId();
 
 		m_stagedFunctions.emplace_back(&functionInfo);
 		return *info.label;
@@ -477,7 +478,7 @@ private:
 class StackLayoutGenerator
 {
 public:
-	StackLayoutGenerator(OptimizedCodeTransformContext& _context, AbstractAssembly& _assembly, BuiltinContext& _builtinContext, bool _useNamedLabelsForFunctions);
+	StackLayoutGenerator(OptimizedCodeTransformContext& _context);
 
 	void operator()(DFG::BasicBlock const& _block);
 
@@ -492,9 +493,6 @@ private:
 	void visit(DFG::BasicBlock const& _block);
 
 	OptimizedCodeTransformContext& m_context;
-	AbstractAssembly& m_assembly;
-	BuiltinContext& m_builtinContext;
-	bool const m_useNamedLabelsForFunctions = true;
 
 	BlockGenerationInfo* m_currentBlockInfo;
 	Stack* m_stack;
@@ -502,54 +500,9 @@ private:
 	Stack combineStack(Stack const& _stack1, Stack const& _stack2);
 };
 
-StackLayoutGenerator::StackLayoutGenerator(
-	OptimizedCodeTransformContext& _context,
-	AbstractAssembly& _assembly,
-	BuiltinContext& _builtinContext,
-	bool _useNamedLabelsForFunctions):
-m_context(_context),
-m_assembly(_assembly),
-m_builtinContext(_builtinContext),
-m_useNamedLabelsForFunctions(_useNamedLabelsForFunctions)
+StackLayoutGenerator::StackLayoutGenerator(OptimizedCodeTransformContext& _context): m_context(_context)
 {
 
-}
-
-void OptimizedCodeTransform::run(
-	AbstractAssembly& _assembly,
-	AsmAnalysisInfo& _analysisInfo,
-	Block const& _block,
-	EVMDialect const& _dialect,
-	BuiltinContext& _builtinContext,
-	ExternalIdentifierAccess const&,
-	bool _useNamedLabelsForFunctions
-)
-{
-	OptimizedCodeTransformContext context{
-		DataFlowGraphBuilder::build(_analysisInfo, _dialect, _block),
-		{},
-		{},
-		{}
-	};
-	std::cout << std::endl << std::endl;
-	std::cout << "BACKWARD CODEGEN" << std::endl;
-	std::cout << std::endl << std::endl;
-
-	{
-		StackLayoutGenerator stackLayoutGenerator{
-			context,
-			_assembly,
-			_builtinContext,
-			_useNamedLabelsForFunctions
-		};
-		stackLayoutGenerator(*context.dfg->entry);
-	}
-
-	std::cout << std::endl << std::endl;
-	std::cout << "FORWARD CODEGEN" << std::endl;
-	std::cout << std::endl << std::endl;
-
-	CodeGenerator::run(_assembly, _builtinContext, context, *context.dfg->entry);
 }
 
 void StackLayoutGenerator::operator()(DFG::FunctionCall const& _call)
@@ -810,4 +763,36 @@ Stack StackLayoutGenerator::combineStack(Stack const& _stack1, Stack const& _sta
 	std::cout << " BEST: " << stackToString(requiredSwaps.begin()->first) << " (" << requiredSwaps.begin()->second << " swaps)" << std::endl;
 
 	return requiredSwaps.begin()->first;
+}
+
+void OptimizedCodeTransform::run(
+	AbstractAssembly& _assembly,
+	AsmAnalysisInfo& _analysisInfo,
+	Block const& _block,
+	EVMDialect const& _dialect,
+	BuiltinContext& _builtinContext,
+	ExternalIdentifierAccess const&,
+	bool _useNamedLabelsForFunctions
+)
+{
+	OptimizedCodeTransformContext context{
+		DataFlowGraphBuilder::build(_analysisInfo, _dialect, _block),
+		{},
+		{},
+		{}
+	};
+	std::cout << std::endl << std::endl;
+	std::cout << "GENERATE STACK LAYOUTS" << std::endl;
+	std::cout << std::endl << std::endl;
+
+	{
+		StackLayoutGenerator stackLayoutGenerator{context};
+		stackLayoutGenerator(*context.dfg->entry);
+	}
+
+	std::cout << std::endl << std::endl;
+	std::cout << "FORWARD CODEGEN" << std::endl;
+	std::cout << std::endl << std::endl;
+
+	CodeGenerator::run(_assembly, _builtinContext, _useNamedLabelsForFunctions, context, *context.dfg->entry);
 }
