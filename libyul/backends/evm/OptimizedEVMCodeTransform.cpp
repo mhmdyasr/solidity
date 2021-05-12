@@ -194,7 +194,7 @@ public:
 		yulAssert(info.label.has_value(), "");
 
 		m_assembly.appendLabel(*info.label);
-		createStackLayout(m_stack, *info.entryLayout);
+		createStackLayout(*info.entryLayout);
 
 		(*this)(*_functionInfo.entry, false);
 
@@ -205,7 +205,7 @@ public:
 
 		std::cout << "Return from function " << _functionInfo.function->name.str() << std::endl;
 		std::cout << "EXIT STACK: " << OptimizedCodeTransform::stackToString(exitStack) << std::endl;
-		createStackLayout(m_stack, exitStack);
+		createStackLayout(exitStack);
 		m_assembly.setSourceLocation(locationOf(_functionInfo));
 		m_assembly.appendJump(0, AbstractAssembly::JumpType::OutOfFunction); // TODO: stack height diff.
 		m_assembly.setStackHeight(0);
@@ -296,10 +296,10 @@ public:
 		for (auto const& operation: _block.operations)
 		{
 			OptimizedCodeTransformContext::OperationInfo const& operationInfo = m_info.operationStacks.at(&operation);
-			createStackLayout(m_stack, operationInfo.entryStack);
+			createStackLayout(operationInfo.entryStack);
 			std::visit(*this, operation.operation);
 			// TODO: is this actually necessary each time? Last time is probably enough, if at all needed.
-			createStackLayout(m_stack, operationInfo.exitStack);
+			createStackLayout(operationInfo.exitStack);
 		}
 
 		std::cout << std::endl << std::endl;
@@ -320,7 +320,7 @@ public:
 
 				BlockGenerationInfo& targetInfo = m_info.blockInfos.at(_jump.target);
 				std::cout << "F: CURRENT " << OptimizedCodeTransform::stackToString(m_stack) << " => " << OptimizedCodeTransform::stackToString(*targetInfo.entryLayout) << std::endl;
-				createStackLayout(m_stack, *targetInfo.entryLayout);
+				createStackLayout(*targetInfo.entryLayout);
 
 				if (!targetInfo.label && _jump.target->entries.size() == 1)
 					(*this)(*_jump.target);
@@ -398,9 +398,9 @@ public:
 	}
 
 
-	void createStackLayout(Stack& _currentStack, Stack _targetStack)
+	void createStackLayout(Stack _targetStack)
 	{
-		::createStackLayout(_currentStack, move(_targetStack), [&](unsigned _i) {
+		::createStackLayout(m_stack, move(_targetStack), [&](unsigned _i) {
 			m_assembly.appendInstruction(evmasm::swapInstruction(_i));
 		}, [&](unsigned _i) {
 			m_assembly.appendInstruction(evmasm::dupInstruction(_i));
