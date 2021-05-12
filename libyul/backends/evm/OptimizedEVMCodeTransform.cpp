@@ -187,9 +187,9 @@ public:
 	{
 		ScopedSaveAndRestore restoreStack(m_stack, {});
 		DFG::FunctionInfo const& functionInfo = m_info.dfg->functions.at(&_function);
-		BlockGenerationInfo& info = m_info.blockInfos.at(functionInfo.entry);
-		if (!info.label)
-			info.label = m_useNamedLabelsForFunctions ?
+		if (!m_functionLabels.count(&functionInfo))
+		{
+			m_functionLabels[&functionInfo] = m_useNamedLabelsForFunctions ?
 				m_assembly.namedLabel(
 					functionInfo.function->name.str(),
 					functionInfo.function->arguments.size(),
@@ -197,13 +197,14 @@ public:
 					{}
 				) : m_assembly.newLabelId();
 
-		m_stagedFunctions.emplace_back(&functionInfo);
-		return *info.label;
+			m_stagedFunctions.emplace_back(&functionInfo);
+		}
+		return m_functionLabels[&functionInfo];
 	}
 
 	void operator()(DFG::FunctionInfo const& _functionInfo)
 	{
-		BlockGenerationInfo& info = m_info.blockInfos.at(_functionInfo.entry);
+		BlockGenerationInfo const& info = m_info.blockInfos.at(_functionInfo.entry);
 
 		std::cout << std::endl;
 		std::cout << "F: start of function " << _functionInfo.function->name.str() << std::endl;
@@ -213,12 +214,12 @@ public:
 			m_stack.emplace_back(param);
 		m_assembly.setStackHeight(static_cast<int>(m_stack.size()));
 		m_assembly.setSourceLocation(locationOf(_functionInfo));
-		yulAssert(info.label.has_value(), "");
+		yulAssert(m_functionLabels.count(&_functionInfo), "");
 
-		m_assembly.appendLabel(*info.label);
+		m_assembly.appendLabel(m_functionLabels.at(&_functionInfo));
 		createStackLayout(*info.entryLayout);
 
-		(*this)(*_functionInfo.entry, false);
+		(*this)(*_functionInfo.entry);
 
 		Stack exitStack = _functionInfo.returnVariables | ranges::views::transform([](auto const& _varSlot){
 			return StackSlot{_varSlot};
@@ -291,22 +292,22 @@ public:
 
 
 	// TODO: get rid of _insertLabel hack.
-	void operator()(DFG::BasicBlock const& _block, bool _insertLabel = true)
+	void operator()(DFG::BasicBlock const& _block)
 	{
 		if (m_generated.count(&_block))
 			return;
 		m_generated.insert(&_block);
 
-		BlockGenerationInfo& info = m_info.blockInfos.at(&_block);
+		BlockGenerationInfo const& info = m_info.blockInfos.at(&_block);
 
-		if (_insertLabel && info.label)
-			m_assembly.appendLabel(*info.label);
+		if (auto label = util::valueOrNullptr(m_blockLabels, &_block))
+			m_assembly.appendLabel(*label);
 
 		std::cout << "F: GENERATING: " << &_block << std::endl;
 
 		for (auto const& entry: _block.entries)
 		{
-			BlockGenerationInfo& entryInfo = m_info.blockInfos.at(entry);
+			BlockGenerationInfo const& entryInfo = m_info.blockInfos.at(entry);
 			std::cout << " F: EXIT LAYOUT OF ENTRY: " << stackToString(*entryInfo.exitLayout) << std::endl;
 		}
 
@@ -340,19 +341,19 @@ public:
 			{
 				std::cout << "F: JUMP EXIT TO: " << _jump.target << std::endl;
 
-				BlockGenerationInfo& targetInfo = m_info.blockInfos.at(_jump.target);
+				BlockGenerationInfo const& targetInfo = m_info.blockInfos.at(_jump.target);
 				std::cout << "F: CURRENT " << stackToString(m_stack) << " => " << stackToString(*targetInfo.entryLayout) << std::endl;
 				createStackLayout(*targetInfo.entryLayout);
 
-				if (!targetInfo.label && _jump.target->entries.size() == 1)
+				if (!m_blockLabels.count(_jump.target) && _jump.target->entries.size() == 1)
 					(*this)(*_jump.target);
 				else
 				{
-					if (!targetInfo.label)
-						targetInfo.label = m_assembly.newLabelId();
+					if (!m_blockLabels.count(_jump.target))
+						m_blockLabels[_jump.target] = m_assembly.newLabelId();
 
 					if (m_generated.count(_jump.target))
-						m_assembly.appendJumpTo(*targetInfo.label);
+						m_assembly.appendJumpTo(m_blockLabels[_jump.target]);
 					else
 						(*this)(*_jump.target);
 				}
@@ -361,19 +362,19 @@ public:
 			{
 				std::cout << "F: CONDITIONAL JUMP EXIT TO: " << _conditionalJump.nonZero << " / " << _conditionalJump.zero << std::endl;
 				std::cout << "F: CURRENT EXIT LAYOUT: " << stackToString(*info.exitLayout) << std::endl;
-				BlockGenerationInfo& nonZeroInfo = m_info.blockInfos.at(_conditionalJump.nonZero);
-				BlockGenerationInfo& zeroInfo = m_info.blockInfos.at(_conditionalJump.zero);
+				BlockGenerationInfo const& nonZeroInfo = m_info.blockInfos.at(_conditionalJump.nonZero);
+				BlockGenerationInfo const& zeroInfo = m_info.blockInfos.at(_conditionalJump.zero);
 				std::cout << "F: non-zero entry layout: " << stackToString(*nonZeroInfo.entryLayout) << std::endl;
 				std::cout << "F: zero entry layout: " << stackToString(*zeroInfo.entryLayout) << std::endl;
 
 				for (auto const* nonZeroEntry: _conditionalJump.nonZero->entries)
 				{
-					BlockGenerationInfo& entryInfo = m_info.blockInfos.at(nonZeroEntry);
+					BlockGenerationInfo const& entryInfo = m_info.blockInfos.at(nonZeroEntry);
 					std::cout << "  F: non-zero entry exit: " << stackToString(*entryInfo.exitLayout) << std::endl;
 				}
 				for (auto const* zeroEntry: _conditionalJump.zero->entries)
 				{
-					BlockGenerationInfo& entryInfo = m_info.blockInfos.at(zeroEntry);
+					BlockGenerationInfo const& entryInfo = m_info.blockInfos.at(zeroEntry);
 					std::cout << "  F: zero entry exit: " << stackToString(*entryInfo.exitLayout) << std::endl;
 				}
 /*
@@ -381,20 +382,20 @@ public:
 				yulAssert(nonZeroInfo.entryLayout == zeroInfo.entryLayout, "");
 				yulAssert((m_stack | ranges::views::drop_last(1) | ranges::to<Stack>) == nonZeroInfo.entryLayout, "");
 */
-				if (!nonZeroInfo.label)
-					nonZeroInfo.label = m_assembly.newLabelId();
-				m_assembly.appendJumpToIf(*nonZeroInfo.label);
+				if (!m_blockLabels.count(_conditionalJump.nonZero))
+					m_blockLabels[_conditionalJump.nonZero] = m_assembly.newLabelId();
+				m_assembly.appendJumpToIf(m_blockLabels[_conditionalJump.nonZero]);
 
 
-				if (!zeroInfo.label && _conditionalJump.zero->entries.size() == 1)
+				if (!m_blockLabels.count(_conditionalJump.zero) && _conditionalJump.zero->entries.size() == 1)
 					(*this)(*_conditionalJump.zero);
 				else
 				{
-					if (!zeroInfo.label)
-						zeroInfo.label = m_assembly.newLabelId();
+					if (!m_blockLabels.count(_conditionalJump.zero))
+						m_blockLabels[_conditionalJump.zero] = m_assembly.newLabelId();
 
 					if (m_generated.count(_conditionalJump.zero))
-						m_assembly.appendJumpTo(*zeroInfo.label);
+						m_assembly.appendJumpTo(m_blockLabels[_conditionalJump.zero]);
 					else
 						(*this)(*_conditionalJump.zero);
 				}
@@ -470,6 +471,8 @@ private:
 	OptimizedCodeTransformContext const& m_info;
 	Stack m_stack;
 	std::map<yul::FunctionCall const*, AbstractAssembly::LabelID> m_returnLabels;
+	std::map<DFG::BasicBlock const*, AbstractAssembly::LabelID> m_blockLabels;
+	std::map<DFG::FunctionInfo const*, AbstractAssembly::LabelID> m_functionLabels;
 	std::set<DFG::BasicBlock const*> m_generated;
 	std::list<DFG::FunctionInfo const*> m_stagedFunctions;
 	std::set<DFG::FunctionInfo const*> m_generatedFunctions;
@@ -619,9 +622,12 @@ void StackLayoutGenerator::operator()(DFG::BasicBlock const& _block)
 {
 	if (m_context.blockInfos.count(&_block))
 		return;
-	ScopedSaveAndRestore currentBlockInfoRestore(m_currentBlockInfo, &m_context.stagedBlocks.emplace_back(BlockGenerationInfo{&_block}));
+	BlockGenerationInfo& info = m_context.blockInfos[&_block] = BlockGenerationInfo{&_block};
+	ScopedSaveAndRestore currentBlockInfoRestore(
+		m_currentBlockInfo,
+		&info
+	);
 	ScopedSaveAndRestore stackRestore(m_stack, nullptr);
-	m_context.blockInfos.emplace(&_block, *m_currentBlockInfo);
 
 	Stack currentStack;
 
@@ -777,7 +783,6 @@ void OptimizedCodeTransform::run(
 {
 	OptimizedCodeTransformContext context{
 		DataFlowGraphBuilder::build(_analysisInfo, _dialect, _block),
-		{},
 		{},
 		{}
 	};

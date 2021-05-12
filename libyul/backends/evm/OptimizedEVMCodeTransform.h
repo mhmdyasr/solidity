@@ -40,17 +40,16 @@ namespace solidity::yul
 {
 struct AsmAnalysisInfo;
 
-struct BlockGenerationInfo {
+struct BlockGenerationInfo
+{
 	DFG::BasicBlock const* block = nullptr;
-	std::optional<AbstractAssembly::LabelID> label{};
 	std::optional<Stack> entryLayout{};
 	std::optional<Stack> exitLayout{};
 };
 struct OptimizedCodeTransformContext
 {
 	std::unique_ptr<DFG> dfg;
-	std::list<BlockGenerationInfo> stagedBlocks;
-	std::map<DFG::BasicBlock const*, BlockGenerationInfo&> blockInfos;
+	std::map<DFG::BasicBlock const*, BlockGenerationInfo> blockInfos;
 	struct OperationInfo
 	{
 		Stack entryStack;
