@@ -66,6 +66,12 @@ struct OptimizedCodeTransformContext
 	std::unique_ptr<DFG> dfg;
 	std::list<BlockGenerationInfo> stagedBlocks;
 	std::map<DFG::BasicBlock const*, BlockGenerationInfo&> blockInfos;
+	struct OperationInfo
+	{
+		Stack entryStack;
+		Stack exitStack;
+	};
+	std::map<DFG::Operation const*, OperationInfo> operationStacks;
 };
 
 class OptimizedCodeTransform

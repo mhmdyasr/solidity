@@ -269,6 +269,265 @@ void createStackLayout(Stack& _currentStack, Stack _targetStack, CodeGenerationC
 }
 }
 
+class CodeGenerator
+{
+public:
+	CodeGenerator(AbstractAssembly& _assembly, BuiltinContext& _builtinContext, OptimizedCodeTransformContext const& _info):
+	m_assembly(_assembly), m_builtinContext(_builtinContext), m_info(_info) {}
+
+
+	AbstractAssembly::LabelID getFunctionLabel(Scope::Function const& _function)
+	{
+		ScopedSaveAndRestore restoreStack(m_stack, {});
+		DFG::FunctionInfo const& functionInfo = m_info.dfg->functions.at(&_function);
+		(*this)(functionInfo);
+		auto label = m_info.blockInfos.at(functionInfo.entry).label;
+		yulAssert(label.has_value(), "");
+		return *label;
+	}
+
+	void operator()(DFG::FunctionInfo const& _functionInfo)
+	{
+		BlockGenerationInfo& info = m_info.blockInfos.at(_functionInfo.entry);
+
+		info.label = m_useNamedLabelsForFunctions ?
+			m_assembly.namedLabel(
+				_functionInfo.function->name.str(),
+				_functionInfo.function->arguments.size(),
+				_functionInfo.function->returns.size(),
+				{}
+			) : m_assembly.newLabelId();
+
+		std::cout << "F: start of function " << _functionInfo.function->name.str() << std::endl;
+		m_stack.clear();
+		m_stack.emplace_back(ReturnLabelSlot{});
+		for (auto const& param: _functionInfo.parameters)
+			m_stack.emplace_back(param);
+		m_assembly.setStackHeight(static_cast<int>(m_stack.size()));
+		m_assembly.setSourceLocation(locationOf(_functionInfo));
+		m_assembly.appendLabel(*info.label);
+		(*this)(*_functionInfo.entry);
+	}
+
+	void operator()(DFG::FunctionCall const& _call)
+	{
+		auto entryLabel = getFunctionLabel(*_call.function);
+		std::cout << "F: function call " << _call.functionCall->functionName.name.str() << " pre: " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+		m_assembly.setSourceLocation(locationOf(_call));
+		m_assembly.appendJumpTo(
+			entryLabel,
+			static_cast<int>(_call.function->returns.size() - _call.function->arguments.size()) - 1,
+			AbstractAssembly::JumpType::IntoFunction
+		);
+		m_assembly.appendLabel(m_returnLabels.at(_call.functionCall));
+		for (size_t i = 0; i < _call.function->arguments.size() + 1; ++i)
+			m_stack.pop_back();
+		for (size_t i = 0; i < _call.function->returns.size(); ++i)
+			m_stack.emplace_back(TemporarySlot{_call.functionCall, i});
+		std::cout << "F: function call " << _call.functionCall->functionName.name.str() << " post: " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+	}
+
+	void operator()(DFG::BuiltinCall const& _call)
+	{
+		std::cout << "F: builtin call " << _call.functionCall->functionName.name.str() << " pre: " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+		m_assembly.setSourceLocation(locationOf(_call));
+		_call.builtin->generateCode(*_call.functionCall, m_assembly, m_builtinContext, [](auto&&){});
+		for (size_t i = 0; i < _call.arguments; ++i)
+			m_stack.pop_back();
+		for (size_t i = 0; i < _call.builtin->returns.size(); ++i)
+			m_stack.emplace_back(TemporarySlot{_call.functionCall, i});
+		std::cout << "F: builtin call " << _call.functionCall->functionName.name.str() << " post: " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+	}
+
+	void operator()(DFG::Assignment const& _assignment)
+	{
+		m_assembly.setSourceLocation(locationOf(_assignment));
+		std::cout << "F: assign (";
+		for (auto var: _assignment.variables)
+			std::cout << var.variable->name.str() << " ";
+		std::cout << ") pre: " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+
+		for(auto& currentSlot: m_stack)
+			if (VariableSlot const* varSlot = get_if<VariableSlot>(&currentSlot))
+				if (util::findOffset(_assignment.variables, *varSlot))
+					currentSlot = JunkSlot{};
+
+		for (auto&& [currentSlot, varSlot]: ranges::zip_view(m_stack | ranges::views::take_last(_assignment.variables.size()), _assignment.variables))
+			currentSlot = varSlot;
+
+		std::cout << "F: assign (";
+		for (auto var: _assignment.variables)
+			std::cout << var.variable->name.str() << " ";
+		std::cout << ") post: " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+	}
+
+
+
+	void operator()(DFG::BasicBlock const& _block)
+	{
+		if (m_generated.count(&_block))
+			return;
+		m_generated.insert(&_block);
+
+		BlockGenerationInfo& info = m_info.blockInfos.at(&_block);
+
+		if (info.label)
+			m_assembly.appendLabel(*info.label);
+
+		std::cout << "F: GENERATING: " << &_block << " (" << info.generators.size() << " generators)" << std::endl;
+
+		for (auto const& entry: _block.entries)
+		{
+			BlockGenerationInfo& entryInfo = m_info.blockInfos.at(entry);
+			std::cout << " F: EXIT LAYOUT OF ENTRY: " << OptimizedCodeTransform::stackToString(*entryInfo.exitLayout) << std::endl;
+		}
+
+		m_stack = *info.entryLayout;
+		m_assembly.setStackHeight(static_cast<int>(m_stack.size()));
+		std::cout << "F: ASSUMED ENTRY LAYOUT: " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+
+/*
+		for (auto const& generator: info.generators | ranges::views::reverse)
+			(*generator)(generationContext);
+		*/
+		for (auto const& operation: _block.operations)
+		{
+			OptimizedCodeTransformContext::OperationInfo const& operationInfo = m_info.operationStacks.at(&operation);
+			createStackLayout(m_stack, operationInfo.entryStack);
+			std::visit(*this, operation.operation);
+			createStackLayout(m_stack, operationInfo.exitStack);
+		}
+
+		std::cout << std::endl << std::endl;
+		std::cout << "F: EXIT LAYOUT (" << &_block << "): " << OptimizedCodeTransform::stackToString(*info.exitLayout) << " == " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+		yulAssert(info.exitLayout == m_stack, "");
+
+		std::visit(util::GenericVisitor{
+			[&](std::monostate)
+			{
+				std::cout << "F: MAIN EXIT" << std::endl;
+				m_assembly.appendInstruction(evmasm::Instruction::STOP);
+			},
+			[&](DFG::BasicBlock::Jump const& _jump)
+			{
+				std::cout << "F: JUMP EXIT TO: " << _jump.target << std::endl;
+
+				BlockGenerationInfo& targetInfo = m_info.blockInfos.at(_jump.target);
+				std::cout << "F: CURRENT " << OptimizedCodeTransform::stackToString(m_stack) << " => " << OptimizedCodeTransform::stackToString(*targetInfo.entryLayout) << std::endl;
+				createStackLayout(m_stack, *targetInfo.entryLayout);
+
+				if (!targetInfo.label && _jump.target->entries.size() == 1)
+					(*this)(*_jump.target);
+				else
+				{
+					if (!targetInfo.label)
+						targetInfo.label = m_assembly.newLabelId();
+
+					if (m_generated.count(_jump.target))
+						m_assembly.appendJumpTo(*targetInfo.label);
+					else
+						(*this)(*_jump.target);
+				}
+			},
+			[&](DFG::BasicBlock::ConditionalJump const& _conditionalJump)
+			{
+				std::cout << "F: CONDITIONAL JUMP EXIT TO: " << _conditionalJump.nonZero << " / " << _conditionalJump.zero << std::endl;
+				BlockGenerationInfo& nonZeroInfo = m_info.blockInfos.at(_conditionalJump.nonZero);
+				BlockGenerationInfo& zeroInfo = m_info.blockInfos.at(_conditionalJump.zero);
+				std::cout << "F: non-zero entry layout: " << OptimizedCodeTransform::stackToString(*nonZeroInfo.entryLayout) << std::endl;
+				std::cout << "F: zero entry layout: " << OptimizedCodeTransform::stackToString(*zeroInfo.entryLayout) << std::endl;
+
+				for (auto const* nonZeroEntry: _conditionalJump.nonZero->entries)
+				{
+					BlockGenerationInfo& entryInfo = m_info.blockInfos.at(nonZeroEntry);
+					std::cout << "  F: non-zero entry exit: " << OptimizedCodeTransform::stackToString(*entryInfo.exitLayout) << std::endl;
+				}
+				for (auto const* zeroEntry: _conditionalJump.zero->entries)
+				{
+					BlockGenerationInfo& entryInfo = m_info.blockInfos.at(zeroEntry);
+					std::cout << "  F: zero entry exit: " << OptimizedCodeTransform::stackToString(*entryInfo.exitLayout) << std::endl;
+				}
+
+				yulAssert(nonZeroInfo.entryLayout == zeroInfo.entryLayout, "");
+				yulAssert((m_stack | ranges::views::drop_last(1) | ranges::to<Stack>) == nonZeroInfo.entryLayout, "");
+
+				if (!nonZeroInfo.label)
+					nonZeroInfo.label = m_assembly.newLabelId();
+				m_assembly.appendJumpToIf(*nonZeroInfo.label);
+
+
+				if (!zeroInfo.label && _conditionalJump.zero->entries.size() == 1)
+					(*this)(*_conditionalJump.zero);
+				else
+				{
+					if (!zeroInfo.label)
+						zeroInfo.label = m_assembly.newLabelId();
+
+					if (m_generated.count(_conditionalJump.zero))
+						m_assembly.appendJumpTo(*zeroInfo.label);
+					else
+						(*this)(*_conditionalJump.zero);
+				}
+
+				(*this)(*_conditionalJump.nonZero);
+			},
+			[&](DFG::BasicBlock::FunctionReturn const& _functionReturn)
+			{
+				std::cout << "F: Function return exit." << _functionReturn.info->function->name.str() << std::endl;
+			},
+			[&](DFG::BasicBlock::Revert const&)
+			{
+				std::cout << "F: REVERT EXIT" << std::endl;
+				yulAssert(false, "");
+
+			},
+			[&](DFG::BasicBlock::Stop const&)
+			{
+				std::cout << "F: STOP EXIT" << std::endl;
+				yulAssert(false, "");
+			}
+		}, _block.exit);
+	}
+
+
+	void createStackLayout(Stack& _currentStack, Stack _targetStack)
+	{
+		::createStackLayout(_currentStack, move(_targetStack), [&](unsigned _i) {
+			m_assembly.appendInstruction(evmasm::swapInstruction(_i));
+		}, [&](unsigned _i) {
+			m_assembly.appendInstruction(evmasm::dupInstruction(_i));
+		}, [&](StackSlot const& _slot) {
+			std::visit(util::GenericVisitor{
+				[&](LiteralSlot const &_literal)
+				{
+					m_assembly.setSourceLocation(locationOf(_literal));
+					m_assembly.appendConstant(_literal.value);
+				},
+				[&](ReturnLabelSlot const& _returnLabel)
+				{
+					yulAssert(_returnLabel.call, "Cannot produce function return label.");
+					if (!m_returnLabels.count(_returnLabel.call))
+						m_returnLabels[_returnLabel.call] = m_assembly.newLabelId();
+					m_assembly.appendLabelReference(m_returnLabels.at(_returnLabel.call));
+				},
+				[&](auto const& _slot)
+				{
+					std::cout << "SLOT: " << OptimizedCodeTransform::stackSlotToString(StackSlot{_slot}) << std::endl;
+					yulAssert(false, "Slot not found.");
+				}
+			}, _slot);
+		}, [&]() { m_assembly.appendInstruction(evmasm::Instruction::POP); });
+	}
+private:
+	AbstractAssembly& m_assembly;
+	BuiltinContext& m_builtinContext;
+	bool m_useNamedLabelsForFunctions = true; // TODO: pass in
+	OptimizedCodeTransformContext const& m_info;
+	Stack m_stack;
+	std::map<yul::FunctionCall const*, AbstractAssembly::LabelID> m_returnLabels;
+	std::set<DFG::BasicBlock const*> m_generated;
+};
+
 OptimizedCodeTransform::OptimizedCodeTransform(
 	OptimizedCodeTransformContext& _context,
 	AbstractAssembly& _assembly,
@@ -295,6 +554,7 @@ void OptimizedCodeTransform::run(
 	OptimizedCodeTransformContext context{
 		DataFlowGraphBuilder::build(_analysisInfo, _dialect, _block),
 		{},
+		{},
 		{}
 	};
 	std::cout << std::endl << std::endl;
@@ -315,6 +575,9 @@ void OptimizedCodeTransform::run(
 	std::cout << "FORWARD CODEGEN" << std::endl;
 	std::cout << std::endl << std::endl;
 
+	CodeGenerator generator{_assembly, _builtinContext, context};
+	generator(*context.dfg->entry);
+#if 0
 	CodeGenerationContext generationContext{_assembly, _builtinContext, {}, {}};
 
 	std::set<DFG::BasicBlock*> generated;
@@ -438,6 +701,7 @@ void OptimizedCodeTransform::run(
 	};
 
 	forwardGenerate(*context.dfg->entry, forwardGenerate);
+#endif
 /*
 	for(auto& block: context.stagedBlocks)
 	{
@@ -516,6 +780,9 @@ void OptimizedCodeTransform::operator()(DFG::Operation const& _operation)
 {
 	yulAssert(m_stack, "");
 
+	OptimizedCodeTransformContext::OperationInfo& operationInfo = m_context.operationStacks[&_operation];
+	operationInfo.exitStack = *m_stack;
+
 	std::cout << "OPERATION post:   " << stackToString(*m_stack) << std::endl
 	          << "          input:  " << stackToString(_operation.input) << std::endl
 			  << "          output: " << stackToString(_operation.output) << std::endl;
@@ -580,10 +847,18 @@ void OptimizedCodeTransform::operator()(DFG::Operation const& _operation)
 	for (StackSlot const& input: _operation.input)
 		m_stack->emplace_back(input);
 
+	operationInfo.entryStack = *m_stack;
+
 	std::cout << "Operation pre before compress: " << stackToString(*m_stack) << std::endl;
+
+	/*stage([stack = *m_stack](CodeGenerationContext& _context) {
+		createStackLayout(_context.stack, stack, _context);
+	});*/
+
 	for (auto&& [idx, slot]: *m_stack | ranges::views::enumerate | ranges::views::reverse)
 		if (auto const* literalSlot = std::get_if<LiteralSlot>(&slot))
 		{
+			(void)literalSlot;
 			m_stack->pop_back(); // TODO: verify that this is fine during range traversal
 			stage([literal = *literalSlot](CodeGenerationContext& _context) {
 				std::cout << "Compressed literal " << util::toCompactHexWithPrefix(literal.value) << std::endl;
@@ -624,10 +899,10 @@ void OptimizedCodeTransform::operator()(DFG::Operation const& _operation)
 	// TODO: how can we be sure that there are no more duplicates after compression?
 	std::cout << "Operation pre after compress: " << stackToString(*m_stack) << "   " << m_stack << std::endl;
 
-	stage([stack = *m_stack, debug = m_stack](CodeGenerationContext& _context){
+	/*stage([stack = *m_stack, debug = m_stack](CodeGenerationContext& _context){
 		std::cout << "F: Recreate operation layout: " << stackToString(stack) << "   " << debug << std::endl;
 		createStackLayout(_context.stack, stack, _context);
-	});
+	});*/
 }
 
 void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
@@ -651,6 +926,27 @@ void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
 			{
 				(*this)(*_jump.target);
 				BlockGenerationInfo& targetInfo = m_context.blockInfos.at(_jump.target);
+				if (!targetInfo.entryLayout.has_value())
+				{
+					// We're in a loop. We must have jumped here conditionally:
+					auto const* conditionalJump = get_if<DFG::BasicBlock::ConditionalJump>(&_jump.target->exit);
+					yulAssert(conditionalJump, "");
+					std::cout << "Current " << &_block << " conditonals: " << conditionalJump->zero << " " << conditionalJump->nonZero << std::endl;
+					{
+						BlockGenerationInfo& zeroEntryInfo = m_context.blockInfos.at(conditionalJump->zero);
+						BlockGenerationInfo& nonZeroEntryInfo = m_context.blockInfos.at(conditionalJump->nonZero);
+						// One branch must already have an entry layout, the other is the looping branch.
+						yulAssert(zeroEntryInfo.entryLayout.has_value() != nonZeroEntryInfo.entryLayout.has_value(), "");
+
+						auto layout = zeroEntryInfo.entryLayout ? zeroEntryInfo.entryLayout : nonZeroEntryInfo.entryLayout;
+						yulAssert(layout.has_value(), "");
+						std::cout << "Looping entry layout: " << stackToString(*layout) << std::endl;
+						std::cout << "Zero has value: " << zeroEntryInfo.entryLayout.has_value() << std::endl;
+						std::cout << "Non-Zero has value: " << nonZeroEntryInfo.entryLayout.has_value() << std::endl;
+
+
+					}
+				}
 				yulAssert(targetInfo.entryLayout.has_value(), "");
 				currentStack = *targetInfo.entryLayout;
 				m_currentBlockInfo->exitLayout = currentStack;
