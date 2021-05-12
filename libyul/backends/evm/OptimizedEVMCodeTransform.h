@@ -71,34 +71,6 @@ public:
 		ExternalIdentifierAccess const& _identifierAccess = ExternalIdentifierAccess(),
 		bool _useNamedLabelsForFunctions = false
 	);
-
-	void operator()(DFG::BasicBlock const& _block);
-
-	void operator()(DFG::Operation const& _operation);
-
-	void operator()(DFG::BuiltinCall const& _builtinCall);
-	void operator()(DFG::FunctionCall const& _functionCall);
-	void operator()(DFG::Assignment const& _literal);
-
-private:
-	OptimizedCodeTransform(OptimizedCodeTransformContext& _context, AbstractAssembly& _assembly, BuiltinContext& _builtinContext, bool _useNamedLabelsForFunctions);
-
-	void visit(DFG::BasicBlock const& _block);
-
-	OptimizedCodeTransformContext& m_context;
-	AbstractAssembly& m_assembly;
-	BuiltinContext& m_builtinContext;
-	bool const m_useNamedLabelsForFunctions = true;
-
-	BlockGenerationInfo* m_currentBlockInfo;
-	Stack* m_stack;
-
-	Stack combineStack(Stack const& _stack1, Stack const& _stack2);
-
-	// Debugging.
-public:
-	static std::string stackSlotToString(StackSlot const& _slot);
-	static std::string stackToString(Stack const& _stack);
 };
 
 }

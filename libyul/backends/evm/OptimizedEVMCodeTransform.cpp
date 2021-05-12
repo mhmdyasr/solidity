@@ -36,6 +36,27 @@ using namespace std;
 
 namespace
 {
+
+string stackSlotToString(StackSlot const& _slot)
+{
+	return std::visit(util::GenericVisitor{
+		[](ReturnLabelSlot const& _ret) -> string { return "RET[" + (_ret.call ? _ret.call->functionName.name.str() : "") + "]"; },
+		[](VariableSlot const& _var) { return _var.variable->name.str(); },
+		[](LiteralSlot const& _lit) { return util::toCompactHexWithPrefix(_lit.value); },
+		[](TemporarySlot const&) -> string { return "TMP"; },
+		[](JunkSlot const&) -> string { return "JUNK"; }
+	}, _slot);
+}
+
+string stackToString(Stack const& _stack)
+{
+	string result("[ ");
+	for (auto const& slot: _stack)
+		result += stackSlotToString(slot) + ' ';
+	result += ']';
+	return result;
+}
+
 #if 0
 template<typename Range, typename Value>
 vector<int> findAllOffsets(Range&& _range, Value&& _value)
@@ -62,7 +83,7 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 	if (_currentStack == _targetStack)
 		return;
 	if (!_silent)
-		std::cout << "CREATE STACK LAYOUT: " << OptimizedCodeTransform::stackToString(_targetStack) << " FROM " << OptimizedCodeTransform::stackToString(_currentStack) << std::endl;
+		std::cout << "CREATE STACK LAYOUT: " << stackToString(_targetStack) << " FROM " << stackToString(_currentStack) << std::endl;
 
 	auto cleanStackTop = [&]() {
 		while (!_currentStack.empty() && (holds_alternative<JunkSlot>(_currentStack.back()) || !util::findOffset(_targetStack, _currentStack.back())))
@@ -77,7 +98,7 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 	for (auto&& [pos, slot]: _targetStack | ranges::views::enumerate)
 	{
 		if (!_silent)
-			std::cout << "Want " << OptimizedCodeTransform::stackSlotToString(slot) << " at " << pos << std::endl;
+			std::cout << "Want " << stackSlotToString(slot) << " at " << pos << std::endl;
 		if (pos < _currentStack.size() && _currentStack.at(pos) == slot)
 		{
 			if (!_silent)
@@ -143,7 +164,7 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 	}
 
 	if (!_silent)
-		std::cout << "CREATED STACK LAYOUT: " << OptimizedCodeTransform::stackToString(_currentStack) << std::endl;
+		std::cout << "CREATED STACK LAYOUT: " << stackToString(_currentStack) << std::endl;
 }
 
 }
@@ -204,7 +225,7 @@ public:
 		exitStack.emplace_back(ReturnLabelSlot{});
 
 		std::cout << "Return from function " << _functionInfo.function->name.str() << std::endl;
-		std::cout << "EXIT STACK: " << OptimizedCodeTransform::stackToString(exitStack) << std::endl;
+		std::cout << "EXIT STACK: " << stackToString(exitStack) << std::endl;
 		createStackLayout(exitStack);
 		m_assembly.setSourceLocation(locationOf(_functionInfo));
 		m_assembly.appendJump(0, AbstractAssembly::JumpType::OutOfFunction); // TODO: stack height diff.
@@ -216,7 +237,7 @@ public:
 	{
 		// TODO: it'd probably be wise to assert that the top of the stack matches.
 		auto entryLabel = getFunctionLabel(*_call.function);
-		std::cout << "F: function call " << _call.functionCall->functionName.name.str() << " pre: " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+		std::cout << "F: function call " << _call.functionCall->functionName.name.str() << " pre: " << stackToString(m_stack) << std::endl;
 		m_assembly.setSourceLocation(locationOf(_call));
 		m_assembly.appendJumpTo(
 			entryLabel,
@@ -228,20 +249,20 @@ public:
 			m_stack.pop_back();
 		for (size_t i = 0; i < _call.function->returns.size(); ++i)
 			m_stack.emplace_back(TemporarySlot{_call.functionCall, i});
-		std::cout << "F: function call " << _call.functionCall->functionName.name.str() << " post: " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+		std::cout << "F: function call " << _call.functionCall->functionName.name.str() << " post: " << stackToString(m_stack) << std::endl;
 	}
 
 	void operator()(DFG::BuiltinCall const& _call)
 	{
 		// TODO: it'd probably be wise to assert that the top of the stack matches.
-		std::cout << "F: builtin call " << _call.functionCall->functionName.name.str() << " pre: " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+		std::cout << "F: builtin call " << _call.functionCall->functionName.name.str() << " pre: " << stackToString(m_stack) << std::endl;
 		m_assembly.setSourceLocation(locationOf(_call));
 		_call.builtin->generateCode(*_call.functionCall, m_assembly, m_builtinContext, [](auto&&){});
 		for (size_t i = 0; i < _call.arguments; ++i)
 			m_stack.pop_back();
 		for (size_t i = 0; i < _call.builtin->returns.size(); ++i)
 			m_stack.emplace_back(TemporarySlot{_call.functionCall, i});
-		std::cout << "F: builtin call " << _call.functionCall->functionName.name.str() << " post: " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+		std::cout << "F: builtin call " << _call.functionCall->functionName.name.str() << " post: " << stackToString(m_stack) << std::endl;
 	}
 
 	void operator()(DFG::Assignment const& _assignment)
@@ -250,7 +271,7 @@ public:
 		std::cout << "F: assign (";
 		for (auto var: _assignment.variables)
 			std::cout << var.variable->name.str() << " ";
-		std::cout << ") pre: " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+		std::cout << ") pre: " << stackToString(m_stack) << std::endl;
 
 		for(auto& currentSlot: m_stack)
 			if (VariableSlot const* varSlot = get_if<VariableSlot>(&currentSlot))
@@ -263,7 +284,7 @@ public:
 		std::cout << "F: assign (";
 		for (auto var: _assignment.variables)
 			std::cout << var.variable->name.str() << " ";
-		std::cout << ") post: " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+		std::cout << ") post: " << stackToString(m_stack) << std::endl;
 	}
 
 
@@ -285,13 +306,13 @@ public:
 		for (auto const& entry: _block.entries)
 		{
 			BlockGenerationInfo& entryInfo = m_info.blockInfos.at(entry);
-			std::cout << " F: EXIT LAYOUT OF ENTRY: " << OptimizedCodeTransform::stackToString(*entryInfo.exitLayout) << std::endl;
+			std::cout << " F: EXIT LAYOUT OF ENTRY: " << stackToString(*entryInfo.exitLayout) << std::endl;
 		}
 
 		// TODO: rather assert that this is the current layout (and make sure it always is)?
 		m_stack = *info.entryLayout;
 		m_assembly.setStackHeight(static_cast<int>(m_stack.size()));
-		std::cout << "F: ASSUMED ENTRY LAYOUT: " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+		std::cout << "F: ASSUMED ENTRY LAYOUT: " << stackToString(m_stack) << std::endl;
 
 		for (auto const& operation: _block.operations)
 		{
@@ -303,7 +324,7 @@ public:
 		}
 
 		std::cout << std::endl << std::endl;
-		std::cout << "F: EXIT LAYOUT (" << &_block << "): " << OptimizedCodeTransform::stackToString(*info.exitLayout) << " == " << OptimizedCodeTransform::stackToString(m_stack) << std::endl;
+		std::cout << "F: EXIT LAYOUT (" << &_block << "): " << stackToString(*info.exitLayout) << " == " << stackToString(m_stack) << std::endl;
 		// TODO: conditions!
 		//		yulAssert(info.exitLayout == m_stack, "");
 
@@ -319,7 +340,7 @@ public:
 				std::cout << "F: JUMP EXIT TO: " << _jump.target << std::endl;
 
 				BlockGenerationInfo& targetInfo = m_info.blockInfos.at(_jump.target);
-				std::cout << "F: CURRENT " << OptimizedCodeTransform::stackToString(m_stack) << " => " << OptimizedCodeTransform::stackToString(*targetInfo.entryLayout) << std::endl;
+				std::cout << "F: CURRENT " << stackToString(m_stack) << " => " << stackToString(*targetInfo.entryLayout) << std::endl;
 				createStackLayout(*targetInfo.entryLayout);
 
 				if (!targetInfo.label && _jump.target->entries.size() == 1)
@@ -338,21 +359,21 @@ public:
 			[&](DFG::BasicBlock::ConditionalJump const& _conditionalJump)
 			{
 				std::cout << "F: CONDITIONAL JUMP EXIT TO: " << _conditionalJump.nonZero << " / " << _conditionalJump.zero << std::endl;
-				std::cout << "F: CURRENT EXIT LAYOUT: " << OptimizedCodeTransform::stackToString(*info.exitLayout) << std::endl;
+				std::cout << "F: CURRENT EXIT LAYOUT: " << stackToString(*info.exitLayout) << std::endl;
 				BlockGenerationInfo& nonZeroInfo = m_info.blockInfos.at(_conditionalJump.nonZero);
 				BlockGenerationInfo& zeroInfo = m_info.blockInfos.at(_conditionalJump.zero);
-				std::cout << "F: non-zero entry layout: " << OptimizedCodeTransform::stackToString(*nonZeroInfo.entryLayout) << std::endl;
-				std::cout << "F: zero entry layout: " << OptimizedCodeTransform::stackToString(*zeroInfo.entryLayout) << std::endl;
+				std::cout << "F: non-zero entry layout: " << stackToString(*nonZeroInfo.entryLayout) << std::endl;
+				std::cout << "F: zero entry layout: " << stackToString(*zeroInfo.entryLayout) << std::endl;
 
 				for (auto const* nonZeroEntry: _conditionalJump.nonZero->entries)
 				{
 					BlockGenerationInfo& entryInfo = m_info.blockInfos.at(nonZeroEntry);
-					std::cout << "  F: non-zero entry exit: " << OptimizedCodeTransform::stackToString(*entryInfo.exitLayout) << std::endl;
+					std::cout << "  F: non-zero entry exit: " << stackToString(*entryInfo.exitLayout) << std::endl;
 				}
 				for (auto const* zeroEntry: _conditionalJump.zero->entries)
 				{
 					BlockGenerationInfo& entryInfo = m_info.blockInfos.at(zeroEntry);
-					std::cout << "  F: zero entry exit: " << OptimizedCodeTransform::stackToString(*entryInfo.exitLayout) << std::endl;
+					std::cout << "  F: zero entry exit: " << stackToString(*entryInfo.exitLayout) << std::endl;
 				}
 /*
  * TODO!
@@ -420,7 +441,7 @@ public:
 				},
 				[&](auto const& _slot)
 				{
-					std::cout << "SLOT: " << OptimizedCodeTransform::stackSlotToString(StackSlot{_slot}) << std::endl;
+					std::cout << "SLOT: " << stackSlotToString(StackSlot{_slot}) << std::endl;
 					yulAssert(false, "Slot not found.");
 				}
 			}, _slot);
@@ -453,7 +474,35 @@ private:
 	std::set<DFG::FunctionInfo const*> m_generatedFunctions;
 };
 
-OptimizedCodeTransform::OptimizedCodeTransform(
+class StackLayoutGenerator
+{
+public:
+	StackLayoutGenerator(OptimizedCodeTransformContext& _context, AbstractAssembly& _assembly, BuiltinContext& _builtinContext, bool _useNamedLabelsForFunctions);
+
+	void operator()(DFG::BasicBlock const& _block);
+
+	void operator()(DFG::Operation const& _operation);
+
+	void operator()(DFG::BuiltinCall const& _builtinCall);
+	void operator()(DFG::FunctionCall const& _functionCall);
+	void operator()(DFG::Assignment const& _literal);
+
+private:
+
+	void visit(DFG::BasicBlock const& _block);
+
+	OptimizedCodeTransformContext& m_context;
+	AbstractAssembly& m_assembly;
+	BuiltinContext& m_builtinContext;
+	bool const m_useNamedLabelsForFunctions = true;
+
+	BlockGenerationInfo* m_currentBlockInfo;
+	Stack* m_stack;
+
+	Stack combineStack(Stack const& _stack1, Stack const& _stack2);
+};
+
+StackLayoutGenerator::StackLayoutGenerator(
 	OptimizedCodeTransformContext& _context,
 	AbstractAssembly& _assembly,
 	BuiltinContext& _builtinContext,
@@ -487,13 +536,13 @@ void OptimizedCodeTransform::run(
 	std::cout << std::endl << std::endl;
 
 	{
-		OptimizedCodeTransform codeTransform{
+		StackLayoutGenerator stackLayoutGenerator{
 			context,
 			_assembly,
 			_builtinContext,
 			_useNamedLabelsForFunctions
 		};
-		codeTransform(*context.dfg->entry);
+		stackLayoutGenerator(*context.dfg->entry);
 	}
 
 	std::cout << std::endl << std::endl;
@@ -503,7 +552,7 @@ void OptimizedCodeTransform::run(
 	CodeGenerator::run(_assembly, _builtinContext, context, *context.dfg->entry);
 }
 
-void OptimizedCodeTransform::operator()(DFG::FunctionCall const& _call)
+void StackLayoutGenerator::operator()(DFG::FunctionCall const& _call)
 {
 	std::cout << "B: function call " << _call.functionCall->functionName.name.str() << ": " << stackToString(*m_stack) << std::endl;
 
@@ -513,12 +562,12 @@ void OptimizedCodeTransform::operator()(DFG::FunctionCall const& _call)
 	(*this)(*functionInfo.entry);
 }
 
-void OptimizedCodeTransform::operator()(DFG::BuiltinCall const& _call)
+void StackLayoutGenerator::operator()(DFG::BuiltinCall const& _call)
 {
 	std::cout << "B: bultin call " << _call.functionCall->functionName.name.str() << ": " << stackToString(*m_stack) << std::endl;
 }
 
-void OptimizedCodeTransform::operator()(DFG::Assignment const& _assignment)
+void StackLayoutGenerator::operator()(DFG::Assignment const& _assignment)
 {
 	std::cout << "B: assignment (";
 	for (auto var: _assignment.variables)
@@ -527,7 +576,7 @@ void OptimizedCodeTransform::operator()(DFG::Assignment const& _assignment)
 }
 
 
-void OptimizedCodeTransform::operator()(DFG::Operation const& _operation)
+void StackLayoutGenerator::operator()(DFG::Operation const& _operation)
 {
 	yulAssert(m_stack, "");
 
@@ -613,7 +662,7 @@ void OptimizedCodeTransform::operator()(DFG::Operation const& _operation)
 	std::cout << "Operation pre after compress: " << stackToString(*m_stack) << "   " << m_stack << std::endl;
 }
 
-void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
+void StackLayoutGenerator::operator()(DFG::BasicBlock const& _block)
 {
 	if (m_context.blockInfos.count(&_block))
 		return;
@@ -697,27 +746,7 @@ void OptimizedCodeTransform::operator()(DFG::BasicBlock const& _block)
 	m_currentBlockInfo->entryLayout = currentStack;
 }
 
-string OptimizedCodeTransform::stackSlotToString(StackSlot const& _slot)
-{
-	return std::visit(util::GenericVisitor{
-		[](ReturnLabelSlot const& _ret) -> string { return "RET[" + (_ret.call ? _ret.call->functionName.name.str() : "") + "]"; },
-		[](VariableSlot const& _var) { return _var.variable->name.str(); },
-		[](LiteralSlot const& _lit) { return util::toCompactHexWithPrefix(_lit.value); },
-		[](TemporarySlot const&) -> string { return "TMP"; },
-		[](JunkSlot const&) -> string { return "JUNK"; }
-	}, _slot);
-}
-
-string OptimizedCodeTransform::stackToString(Stack const& _stack)
-{
-	string result("[ ");
-	for (auto const& slot: _stack)
-		result += stackSlotToString(slot) + ' ';
-	result += ']';
-	return result;
-}
-
-Stack OptimizedCodeTransform::combineStack(Stack const& _stack1, Stack const& _stack2)
+Stack StackLayoutGenerator::combineStack(Stack const& _stack1, Stack const& _stack2)
 {
 	// TODO: there is probably a better way than brute-forcing.
 	std::set<StackSlot> slotSet;
