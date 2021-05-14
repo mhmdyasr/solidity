@@ -19,6 +19,7 @@
 #include <libsolutil/Visitor.h>
 #include <liblangutil/Exceptions.h>
 #include <range/v3/view/enumerate.hpp>
+#include <range/v3/view/iota.hpp>
 
 namespace solidity::util
 {
@@ -70,6 +71,128 @@ void permute(unsigned _n, GetTargetPosition _getTargetPosition, Swap _swap, Pop 
 		// Move it to its position and recurse.
 		_swap(_n - static_cast<unsigned>(targetPositionTop) - 1);
 		permute(_n, _getTargetPosition, _swap, _pop);
+	}
+}
+
+
+template<typename GetTargetPositions, typename Swap, typename Dup, typename Push, typename Pop>
+void permuteDup(unsigned _n, GetTargetPositions _getTargetPositions, Swap _swap, Dup _dup, Push _push, Pop _pop)
+{
+	static_assert(
+		std::is_same_v<std::invoke_result_t<GetTargetPositions, unsigned>, std::set<unsigned>>,
+		"_getTargetPosition needs to have the signature std::vector<int>(unsigned)"
+	);
+	static_assert(
+		std::is_same_v<std::invoke_result_t<Swap, unsigned>, void>,
+		"_swap needs to have the signature void(unsigned)"
+	);
+	static_assert(
+		std::is_same_v<std::invoke_result_t<Dup, unsigned>, void>,
+		"_dup needs to have the signature void(unsigned)"
+	);
+	static_assert(
+		std::is_same_v<std::invoke_result_t<Push>, void>,
+		"_push needs to have the signature void()"
+	);
+	static_assert(
+		std::is_same_v<std::invoke_result_t<Pop>, void>,
+		"_pop needs to have the signature void()"
+	);
+	if (_n == 0) return;
+
+	// DEBUG:
+	for (auto offset: ranges::views::iota(0u, _n))
+	{
+		auto targetPositions = _getTargetPositions(offset);
+		std::cout << "{ ";
+		for (auto pos: targetPositions)
+			std::cout << pos << " ";
+		std::cout << "} ";
+	}
+	std::cout << std::endl;
+
+	std::set<unsigned> targetPositionsTop = _getTargetPositions(_n - 1);
+
+	if (targetPositionsTop.empty())
+	{
+		// The last element should not be kept.
+		// Pop it and recurse.
+		_pop();
+		permuteDup(_n - 1, _getTargetPositions, _swap, _dup, _push, _pop);
+		return;
+	}
+	if (targetPositionsTop.count(_n - 1))
+	{
+		// The last element should remain at the top (but potentially also be dupped).
+		if (targetPositionsTop.size() > 1)
+		{
+			// The last element should remain at the top and be dupped. Dup it and recurse.
+			_dup(1);
+			permuteDup(_n + 1, _getTargetPositions, _swap, _dup, _push, _pop);
+			return;
+		}
+		else
+		{
+			// The last element should *only* exist at the current top.
+			// Look for the deepest element that should still be dupped.
+			for (auto offset: ranges::views::iota(0u, _n))
+			{
+				auto targetPositions = _getTargetPositions(offset);
+				if (targetPositions.size() > 1)
+				{
+					// Dup it, adjust the target positions and recurse.
+					// The next recursion will move the duplicate in place.
+					_dup(_n - offset);
+					permuteDup(_n + 1, _getTargetPositions, _swap, _dup, _push, _pop);
+					return;
+				}
+			}
+			// There is no more dupping requested, so we can switch to the non-dupping version.
+			permute(_n, [&](unsigned _i) -> int {
+				auto const& targetPositions = _getTargetPositions(_i);
+				if (targetPositions.empty())
+					return -1;
+				else
+				{
+					assertThrow(targetPositions.size() == 1, langutil::InternalCompilerError, "");
+					return static_cast<int>(*targetPositions.begin());
+				}
+			}, _swap, _pop);
+			return;
+		}
+	}
+	else
+	{
+		// The last element should end up at *some* position that isn't its current one.
+		auto topTargetPos = *targetPositionsTop.begin();
+		std::cout << "Top target pos: " << topTargetPos << std::endl;
+		if (topTargetPos < _n - 1)
+		{
+			// If the element is supposed to exist anywhere deeper than the current top, swap it there and recurse.
+			_swap(_n - static_cast<unsigned>(topTargetPos) - 1);
+			permuteDup(_n, _getTargetPositions, _swap, _dup, _push, _pop);
+			return;
+		}
+		else
+		{
+			// If there is an element that is supposed to be dupped to the current top position. Find it, dup it and recurse.
+			for (auto offset: ranges::views::iota(0u, _n))
+			{
+				auto targetPositions = _getTargetPositions(offset);
+				if (targetPositions.size() > 1 && targetPositions.count(static_cast<unsigned>(_n)))
+				{
+					_dup(static_cast<unsigned>(targetPositions.size() - offset));
+					permuteDup(_n + 1, _getTargetPositions, _swap, _dup, _push, _pop);
+					return;
+				}
+			}
+			// There must be a new element requested. Request it to be pushed and recurse.
+			_push();
+			permuteDup(_n + 1, _getTargetPositions, _swap, _dup, _push, _pop);
+			return;
+
+			assertThrow(false, langutil::InternalCompilerError, "Invalid permutation.");
+		}
 	}
 }
 

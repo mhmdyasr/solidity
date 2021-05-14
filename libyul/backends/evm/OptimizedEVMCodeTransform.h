@@ -42,7 +42,6 @@ struct AsmAnalysisInfo;
 
 struct BlockGenerationInfo
 {
-	DFG::BasicBlock const* block = nullptr;
 	std::optional<Stack> entryLayout{};
 	std::optional<Stack> exitLayout{};
 };

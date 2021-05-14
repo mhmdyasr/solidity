@@ -57,11 +57,10 @@ string stackToString(Stack const& _stack)
 	return result;
 }
 
-#if 0
 template<typename Range, typename Value>
-vector<int> findAllOffsets(Range&& _range, Value&& _value)
+set<unsigned> findAllOffsets(Range&& _range, Value&& _value)
 {
-	vector<int> result;
+	set<unsigned> result;
 	auto begin = std::begin(_range);
 	auto end = std::end(_range);
 	auto it = begin;
@@ -70,12 +69,11 @@ vector<int> findAllOffsets(Range&& _range, Value&& _value)
 		it = std::find(it, end, std::forward<Value>(_value));
 		if (it == end)
 			return result;
-		result.emplace_back(static_cast<int>(std::distance(begin, it)));
+		result.emplace(static_cast<unsigned>(std::distance(begin, it)));
 		++it;
 	}
 	return result;
 }
-#endif
 
 template<typename Swap, typename Dup, typename Pop, typename PushSlot>
 void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _swap, Dup _dup, PushSlot _push, Pop _pop, bool _silent = false)
@@ -85,6 +83,79 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 	if (!_silent)
 		std::cout << "CREATE STACK LAYOUT: " << stackToString(_targetStack) << " FROM " << stackToString(_currentStack) << std::endl;
 
+	vector<set<unsigned>> targetPositions;
+	for(auto const& currentElement: _currentStack)
+		targetPositions.emplace_back(findAllOffsets(_targetStack, currentElement));
+	vector<optional<StackSlot>> newElements(_targetStack.size(), nullopt);
+	for (auto&& [pos, targetElement]: _targetStack | ranges::views::enumerate)
+		if (!util::findOffset(_currentStack, targetElement))
+			newElements[pos] = targetElement;
+
+	util::permuteDup(static_cast<unsigned>(targetPositions.size()), [&](unsigned _i) {
+		return targetPositions.at(_i);
+	}, [&](unsigned _i) {
+		std::swap(targetPositions.back(), targetPositions.at(targetPositions.size() - _i - 1));
+		std::swap(_currentStack.back(), _currentStack.at(_currentStack.size() - _i - 1));
+		_swap(_i);
+	}, [&](unsigned _i) {
+		_dup(_i);
+		_currentStack.emplace_back(_currentStack.at(_currentStack.size() - _i));
+		auto& positions = targetPositions.at(targetPositions.size() - _i);
+		if(positions.count(static_cast<unsigned>(targetPositions.size())))
+		{
+			positions.erase(static_cast<unsigned>(targetPositions.size()));
+			targetPositions.emplace_back(set<unsigned>{static_cast<unsigned>(targetPositions.size())});
+		}
+		else
+		{
+			optional<unsigned> duppingOffset;
+			for (unsigned pos: positions)
+			{
+				if (pos != targetPositions.size() - _i)
+				{
+					duppingOffset = pos;
+					break;
+				}
+			}
+			yulAssert(duppingOffset, "");
+			positions.erase(*duppingOffset);
+			targetPositions.emplace_back(set<unsigned>{*duppingOffset});
+		}
+	}, [&]() {
+		std::cout << "PUSHING AT SIZE: " << targetPositions.size() << std::endl;
+		if (auto newElement = newElements.at(targetPositions.size()))
+		{
+			std::cout << "NEW ELEMENT AT CORRECT POSITION " << stackSlotToString(*newElement) << std::endl;
+			_push(*newElement);
+			_currentStack.emplace_back(*newElement);
+			newElement = nullopt;
+			targetPositions.emplace_back(set<unsigned>{static_cast<unsigned>(targetPositions.size())});
+		}
+		else
+		{
+			for(auto&& [pos, newElement]: newElements | ranges::views::enumerate)
+			{
+				if (newElement)
+				{
+					std::cout << "PUSHING " << stackSlotToString(*newElement) << " TARGETTING " << pos << std::endl;
+					_push(*newElement);
+					_currentStack.emplace_back(*newElement);
+					newElement = nullopt;
+					targetPositions.emplace_back(set<unsigned>{static_cast<unsigned>(pos)});
+					return;
+				}
+			}
+			yulAssert(false, "");
+		}
+	}, [&]() { _pop(); targetPositions.pop_back(); _currentStack.pop_back(); });
+
+	for (auto newSlot: _targetStack | ranges::views::take_last(_targetStack.size() - _currentStack.size()))
+	{
+		_push(newSlot);
+		_currentStack.emplace_back(newSlot);
+	}
+
+#if 0
 	auto cleanStackTop = [&]() {
 		while (!_currentStack.empty() && (holds_alternative<JunkSlot>(_currentStack.back()) || !util::findOffset(_targetStack, _currentStack.back())))
 		{
@@ -162,9 +233,11 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 		_pop();
 		_currentStack.pop_back();
 	}
-
+#endif
 	if (!_silent)
 		std::cout << "CREATED STACK LAYOUT: " << stackToString(_currentStack) << std::endl;
+	yulAssert(_currentStack == _targetStack, "");
+
 }
 
 }
@@ -423,11 +496,17 @@ public:
 
 	void createStackLayout(Stack _targetStack)
 	{
+		std::cout << "F: CREATE " << stackToString(_targetStack) << " FROM " << stackToString(m_stack) << std::endl;
 		::createStackLayout(m_stack, move(_targetStack), [&](unsigned _i) {
 			m_assembly.appendInstruction(evmasm::swapInstruction(_i));
 		}, [&](unsigned _i) {
 			m_assembly.appendInstruction(evmasm::dupInstruction(_i));
 		}, [&](StackSlot const& _slot) {
+			if (auto offset = util::findOffset(m_stack, _slot))
+			{
+				m_assembly.appendInstruction(evmasm::dupInstruction(static_cast<unsigned>(m_stack.size() - *offset)));
+				return;
+			}
 			std::visit(util::GenericVisitor{
 				[&](LiteralSlot const &_literal)
 				{
@@ -467,7 +546,7 @@ private:
 
 	AbstractAssembly& m_assembly;
 	BuiltinContext& m_builtinContext;
-	bool m_useNamedLabelsForFunctions = true; // TODO: pass in
+	bool m_useNamedLabelsForFunctions = true;
 	OptimizedCodeTransformContext const& m_info;
 	Stack m_stack;
 	std::map<yul::FunctionCall const*, AbstractAssembly::LabelID> m_returnLabels;
@@ -525,6 +604,10 @@ void StackLayoutGenerator::operator()(DFG::BuiltinCall const& _call)
 
 void StackLayoutGenerator::operator()(DFG::Assignment const& _assignment)
 {
+	for (auto& stackSlot: *m_stack)
+		if (auto const* varSlot = get_if<VariableSlot>(&stackSlot))
+			if (util::findOffset(_assignment.variables, *varSlot))
+				stackSlot = JunkSlot{};
 	std::cout << "B: assignment (";
 	for (auto var: _assignment.variables)
 		std::cout << var.variable->name.str() << " ";
@@ -543,17 +626,19 @@ void StackLayoutGenerator::operator()(DFG::Operation const& _operation)
 	          << "          input:  " << stackToString(_operation.input) << std::endl
 			  << "          output: " << stackToString(_operation.output) << std::endl;
 
-	vector<int> targetPositions(_operation.output.size(), -1);
+	vector<set<unsigned>> targetPositions(_operation.output.size(), set<unsigned>{});
 	size_t numToKeep = 0;
 	for (size_t idx: ranges::views::iota(0u, targetPositions.size()))
-		if (auto offset = util::findOffset(*m_stack, _operation.output.at(idx)))
+		for (unsigned offset: findAllOffsets(*m_stack, _operation.output.at(idx)))
 		{
-			targetPositions[idx] = static_cast<int>(*offset);
+			targetPositions[idx].emplace(offset);
 			++numToKeep;
 		}
 
+
+
 	struct PreviousSlot { size_t slot; };
-	vector<variant<PreviousSlot, int>> layout;
+	vector<variant<PreviousSlot, set<unsigned>>> layout;
 	// Before the call the desired stack (below the call arguments) has size m_stack->size() - numToKeep
 	for (size_t slot: ranges::views::iota(0u, m_stack->size() - numToKeep))
 		layout.emplace_back(PreviousSlot{slot});
@@ -561,14 +646,39 @@ void StackLayoutGenerator::operator()(DFG::Operation const& _operation)
 	layout += targetPositions;
 
 	// TODO: argue that util::permute works with this kind of _getTargetPosition.
-	util::permute(static_cast<unsigned>(layout.size()), [&](unsigned _i) {
+	util::permuteDup(static_cast<unsigned>(layout.size()), [&](unsigned _i) -> set<unsigned> {
 		// For call return values the target position is known.
-		if (int* pos = get_if<int>(&layout.at(_i)))
+		if (set<unsigned>* pos = get_if<set<unsigned>>(&layout.at(_i)))
 			return *pos;
 		// Previous arguments can stay where they are.
-		return static_cast<int>(_i);
+		return {_i};
 	}, [&](unsigned _i) {
-		std::swap(layout.back(), layout[layout.size() - _i - 1]);
+		std::swap(layout.back(), layout.at(layout.size() - _i - 1));
+	}, [&](unsigned _i) {
+		auto positions = get_if<set<unsigned>>(&layout.at(layout.size() - _i));
+		yulAssert(positions, "");
+		if(positions->count(static_cast<unsigned>(layout.size())))
+		{
+			positions->erase(static_cast<unsigned>(layout.size()));
+			layout.emplace_back(set<unsigned>{static_cast<unsigned>(layout.size())});
+		}
+		else
+		{
+			optional<unsigned> duppingOffset;
+			for (unsigned pos: *positions)
+			{
+				if (pos != layout.size() - _i)
+				{
+					duppingOffset = pos;
+					break;
+				}
+			}
+			yulAssert(duppingOffset, "");
+			positions->erase(*duppingOffset);
+			layout.emplace_back(set<unsigned>{*duppingOffset});
+		}
+	}, [&]() {
+		yulAssert(false, "");
 	}, [&]() {
 		layout.pop_back();
 	});
@@ -599,7 +709,7 @@ void StackLayoutGenerator::operator()(DFG::Operation const& _operation)
 
 	for (auto&& [idx, slot]: *m_stack | ranges::views::enumerate | ranges::views::reverse)
 		// We can always push literals.
-		if (std::holds_alternative<LiteralSlot>(slot))
+		if (std::holds_alternative<LiteralSlot>(slot) || std::holds_alternative<JunkSlot>(slot))
 			m_stack->pop_back(); // TODO: verify that this is fine during range traversal
 		// We can always push return labels of function calls.
 		else if (auto const* returnLabelSlot = std::get_if<ReturnLabelSlot>(&slot))
@@ -622,7 +732,7 @@ void StackLayoutGenerator::operator()(DFG::BasicBlock const& _block)
 {
 	if (m_context.blockInfos.count(&_block))
 		return;
-	BlockGenerationInfo& info = m_context.blockInfos[&_block] = BlockGenerationInfo{&_block};
+	BlockGenerationInfo& info = m_context.blockInfos[&_block] = BlockGenerationInfo{};
 	ScopedSaveAndRestore currentBlockInfoRestore(
 		m_currentBlockInfo,
 		&info
@@ -680,7 +790,6 @@ void StackLayoutGenerator::operator()(DFG::BasicBlock const& _block)
 			},
 			[&](DFG::BasicBlock::FunctionReturn const& _functionReturn)
 			{
-				// TODO: probably not needed here.
 				yulAssert(_functionReturn.info, "");
 				currentStack = _functionReturn.info->returnVariables | ranges::views::transform([](auto const& _varSlot){
 					return StackSlot{_varSlot};
