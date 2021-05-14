@@ -724,7 +724,6 @@ void StackLayoutGenerator::operator()(DFG::Operation const& _operation)
 			m_stack->pop_back();
 		else
 			break;
-	// TODO: how can we be sure that there are no more duplicates after compression?
 	std::cout << "Operation pre after compress: " << stackToString(*m_stack) << "   " << m_stack << std::endl;
 }
 
@@ -816,7 +815,8 @@ void StackLayoutGenerator::operator()(DFG::BasicBlock const& _block)
 
 Stack StackLayoutGenerator::combineStack(Stack const& _stack1, Stack const& _stack2)
 {
-	// TODO: there is probably a better way than brute-forcing.
+	// TODO: there is probably a better way than brute-forcing. This has n! complexity or worse, so
+	// we can't keep it like this.
 	std::set<StackSlot> slotSet;
 	slotSet += _stack1;
 	slotSet += _stack2;
