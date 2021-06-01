@@ -42,8 +42,8 @@ struct AsmAnalysisInfo;
 
 struct BlockGenerationInfo
 {
-	std::optional<Stack> entryLayout{};
-	std::optional<Stack> exitLayout{};
+	Stack entryLayout{};
+	Stack exitLayout{};
 };
 struct OptimizedCodeTransformContext
 {

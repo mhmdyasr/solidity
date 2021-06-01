@@ -186,6 +186,17 @@ void permuteDup(unsigned _n, GetTargetPositions _getTargetPositions, Swap _swap,
 					return;
 				}
 			}
+			// If there is any other element that is supposed to be dupped. Find it, dup it and recurse.
+			for (auto offset: ranges::views::iota(0u, _n))
+			{
+				auto targetPositions = _getTargetPositions(offset);
+				if (targetPositions.size() > 1)
+				{
+					_dup(static_cast<unsigned>(targetPositions.size() - offset));
+					permuteDup(_n + 1, _getTargetPositions, _swap, _dup, _push, _pop);
+					return;
+				}
+			}
 			// There must be a new element requested. Request it to be pushed and recurse.
 			_push();
 			permuteDup(_n + 1, _getTargetPositions, _swap, _dup, _push, _pop);

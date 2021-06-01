@@ -294,6 +294,7 @@ void DataFlowGraphBuilder::operator()(Switch const&)
 
 void DataFlowGraphBuilder::operator()(ForLoop const& _loop)
 {
+	ScopedSaveAndRestore scopeRestore(m_scope, m_info.scopes.at(&_loop.pre).get());
 	(*this)(_loop.pre);
 
 	DFG::BasicBlock& loopCondition = m_graph.makeBlock();
