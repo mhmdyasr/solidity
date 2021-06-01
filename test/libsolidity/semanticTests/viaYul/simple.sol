@@ -1,14 +1,15 @@
 contract C {
-	function f(uint x) public pure returns(uint y) {
-		unchecked {
-		 y = x * 2;
-		if (x == 2)
-			y = x;
+	fallback() external {
+		assembly {
+			function f(x, y) { mstore(0x00, x) mstore(0x20, y) }
+			f(0x42, 0x21)
+			return(0,0x40)
+
 		}
 	}
 }
 // ====
 // compileViaYul: true
+// allowNonExistingFunctions: true
 // ----
-// f(uint256): 100 ->
-// f(uint256): 2 ->
+// f(uint256): 3 ->

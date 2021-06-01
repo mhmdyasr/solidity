@@ -250,24 +250,37 @@ void DataFlowGraphBuilder::operator()(If const& _if)
 	jump(*afterIf);
 }
 
-void DataFlowGraphBuilder::operator()(Switch const&)
+void DataFlowGraphBuilder::operator()(Switch const& _switch)
 {
-	yulAssert(false, "TODO");
-/*	yulAssert(m_currentBlock, "");
-	StackSlot condition = (*this)(*_switch.expression);
+	yulAssert(m_currentBlock, "");
+	auto ghostVariableId = m_graph.ghostVariables.size();
+	Scope::Variable& ghostVar = m_graph.ghostVariables.emplace_back(Scope::Variable{""_yulstring, YulString("GHOST[" + to_string(ghostVariableId) + "]")});
+
+	m_currentBlock->operations.emplace_back(DFG::Operation{
+		Stack{std::visit(*this, *_switch.expression)},
+		Stack{VariableSlot{&ghostVar}},
+		DFG::Assignment{_switch.debugData, {VariableSlot{&ghostVar}}}
+	});
 
 	auto makeValueCompare = [&](Literal const& _value) {
+
+		// TODO: debug data
 		yul::FunctionCall const& ghostCall = m_graph.ghostCalls.emplace_back(yul::FunctionCall{
-			_value.debugData,
-			yul::Identifier{_value.debugData, "eq"_yulstring},
-			{Identifier{_value.debugData, YulString("GHOST[" + to_string(ghostVariableId) + "]")}, _value}
+			{},
+			yul::Identifier{{}, "eq"_yulstring},
+			{_value, Identifier{{}, YulString("GHOST[" + to_string(ghostVariableId) + "]")}}
 		});
-		return DFG::BuiltinCall{
-			_value.debugData, m_dialect.equalityFunction({}),
-			&ghostCall,
-			{ghostVariable, (*this)(_value)},
-			1
-		};
+
+		BuiltinFunctionForEVM const* builtin = m_dialect.equalityFunction({});
+		yulAssert(builtin, "");
+
+		DFG::Operation& operation = m_currentBlock->operations.emplace_back(DFG::Operation{
+			Stack{VariableSlot{&ghostVar}, LiteralSlot{valueOfLiteral(_value), {}}},
+			Stack{TemporarySlot{&ghostCall, 0}},
+			DFG::BuiltinCall{_switch.debugData, builtin, &ghostCall, 2},
+		});
+
+		return operation.output.front();
 	};
 	DFG::BasicBlock& afterSwitch = m_graph.makeBlock();
 	for(auto const& switchCase: _switch.cases | ranges::views::drop_last(1))
@@ -289,7 +302,7 @@ void DataFlowGraphBuilder::operator()(Switch const&)
 	}
 	else
 		(*this)(switchCase.body);
-	jump(afterSwitch);*/
+	jump(afterSwitch);
 }
 
 void DataFlowGraphBuilder::operator()(ForLoop const& _loop)

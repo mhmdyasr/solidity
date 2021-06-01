@@ -123,8 +123,8 @@ struct DFG
 		std::variant<std::monostate, Jump, ConditionalJump, FunctionReturn, Stop, Revert> exit;
 	};
 	std::list<BasicBlock> blocks;
-	std::vector<Scope::Variable> ghostVariables;
-	std::vector<yul::FunctionCall> ghostCalls;
+	std::list<Scope::Variable> ghostVariables;
+	std::list<yul::FunctionCall> ghostCalls;
 
 	struct FunctionInfo
 	{

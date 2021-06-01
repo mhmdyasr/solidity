@@ -74,9 +74,56 @@ void permute(unsigned _n, GetTargetPosition _getTargetPosition, Swap _swap, Pop 
 	}
 }
 
+template<typename CurrentContainer, typename TargetContainer, typename Compare, typename Swap, typename Dup, typename Generate, typename Pop>
+void permuteNew(CurrentContainer& _current, TargetContainer& _target, Compare _compare, Swap _swap, Dup _dup, Generate _generate, Pop _pop)
+{
+	if (_current.size() > _target.size())
+	{
+		for (auto&& [offset, targetSlot]: _target | ranges::views::enumerate)
+			if (_compare(_current.back(), targetSlot))
+			{
+				_swap(_current.size() - offset - 1);
+				std::swap(_current.back(), _current.at(offset));
+				permuteNew(_current, _target, _compare, _swap, _dup, _generate, _pop);
+				return;
+			}
+		_pop();
+		_current.pop_back();
+		permuteNew(_current, _target, _compare, _swap, _dup, _generate, _pop);
+		return;
+	}
+
+	if (_compare(_current.back(), _target.at(_current.size() - 1)))
+	{
+		for (auto&& [targetOffset, targetSlot]: _target | ranges::views::enumerate)
+			if (!_compare(_current.back(), targetSlot))
+			{
+				for (auto&& [currentOffset, currentSlot]: _current | ranges::views::enumerate)
+				{
+					if (!_compare(currentSlot, _target.at(currentOffset)))
+					{
+
+					}
+				}
+			}
+
+	}
+	else
+	{
+		for (auto&& [targetOffset, targetSlot]: _target | ranges::views::enumerate)
+			if (_compare(_current.back(), targetSlot))
+			{
+				_swap(_current.size() - targetOffset - 1);
+				std::swap(_current.back(), _current.at(targetOffset));
+				permuteNew(_current, _target, _compare, _swap, _dup, _generate, _pop);
+				return;
+			}
+		// There must be an element on the current stack that needs to be dupped.
+	}
+}
 
 template<typename GetTargetPositions, typename Swap, typename Dup, typename Push, typename Pop>
-void permuteDup(unsigned _n, GetTargetPositions _getTargetPositions, Swap _swap, Dup _dup, Push _push, Pop _pop)
+void permuteDup(unsigned _n, GetTargetPositions _getTargetPositions, Swap _swap, Dup _dup, Push _push, Pop _pop, bool _debug = false)
 {
 	static_assert(
 		std::is_same_v<std::invoke_result_t<GetTargetPositions, unsigned>, std::set<unsigned>>,
@@ -100,16 +147,18 @@ void permuteDup(unsigned _n, GetTargetPositions _getTargetPositions, Swap _swap,
 	);
 	if (_n == 0) return;
 
-	// DEBUG:
-	for (auto offset: ranges::views::iota(0u, _n))
+	if (_debug)
 	{
-		auto targetPositions = _getTargetPositions(offset);
-		std::cout << "{ ";
-		for (auto pos: targetPositions)
-			std::cout << pos << " ";
-		std::cout << "} ";
+		for (auto offset: ranges::views::iota(0u, _n))
+		{
+			auto targetPositions = _getTargetPositions(offset);
+			std::cout << "{ ";
+			for (auto pos: targetPositions)
+				std::cout << pos << " ";
+			std::cout << "} ";
+		}
+		std::cout << std::endl;
 	}
-	std::cout << std::endl;
 
 	std::set<unsigned> targetPositionsTop = _getTargetPositions(_n - 1);
 
@@ -118,21 +167,29 @@ void permuteDup(unsigned _n, GetTargetPositions _getTargetPositions, Swap _swap,
 		// The last element should not be kept.
 		// Pop it and recurse.
 		_pop();
-		permuteDup(_n - 1, _getTargetPositions, _swap, _dup, _push, _pop);
+		permuteDup(_n - 1, _getTargetPositions, _swap, _dup, _push, _pop, _debug);
 		return;
 	}
 	if (targetPositionsTop.count(_n - 1))
 	{
+		if (_debug)
+			std::cout << "Top position should stay" << std::endl;
 		// The last element should remain at the top (but potentially also be dupped).
-		if (targetPositionsTop.size() > 1)
+		/*if (targetPositionsTop.size() > 1)
 		{
+			std::cout << "TOP targets: { ";
+			for (auto i: targetPositionsTop)
+				std::cout << i << " ";
+			std::cout << "}" << std::endl;
 			// The last element should remain at the top and be dupped. Dup it and recurse.
 			_dup(1);
 			permuteDup(_n + 1, _getTargetPositions, _swap, _dup, _push, _pop);
 			return;
 		}
-		else
+		else*/
 		{
+			if (_debug)
+				std::cout << "Look for deeper element to be dupped." << std::endl;
 			// The last element should *only* exist at the current top.
 			// Look for the deepest element that should still be dupped.
 			for (auto offset: ranges::views::iota(0u, _n))
@@ -140,10 +197,12 @@ void permuteDup(unsigned _n, GetTargetPositions _getTargetPositions, Swap _swap,
 				auto targetPositions = _getTargetPositions(offset);
 				if (targetPositions.size() > 1)
 				{
+					if (_debug)
+						std::cout << "DUP element " << offset << " (DUP" << (_n - offset) << ")" << std::endl;
 					// Dup it, adjust the target positions and recurse.
 					// The next recursion will move the duplicate in place.
 					_dup(_n - offset);
-					permuteDup(_n + 1, _getTargetPositions, _swap, _dup, _push, _pop);
+					permuteDup(_n + 1, _getTargetPositions, _swap, _dup, _push, _pop, _debug);
 					return;
 				}
 			}
@@ -165,12 +224,13 @@ void permuteDup(unsigned _n, GetTargetPositions _getTargetPositions, Swap _swap,
 	{
 		// The last element should end up at *some* position that isn't its current one.
 		auto topTargetPos = *targetPositionsTop.begin();
-		std::cout << "Top target pos: " << topTargetPos << std::endl;
+		if (_debug)
+			std::cout << "Top target pos: " << topTargetPos << std::endl;
 		if (topTargetPos < _n - 1)
 		{
 			// If the element is supposed to exist anywhere deeper than the current top, swap it there and recurse.
 			_swap(_n - static_cast<unsigned>(topTargetPos) - 1);
-			permuteDup(_n, _getTargetPositions, _swap, _dup, _push, _pop);
+			permuteDup(_n, _getTargetPositions, _swap, _dup, _push, _pop, _debug);
 			return;
 		}
 		else
@@ -182,7 +242,7 @@ void permuteDup(unsigned _n, GetTargetPositions _getTargetPositions, Swap _swap,
 				if (targetPositions.size() > 1 && targetPositions.count(static_cast<unsigned>(_n)))
 				{
 					_dup(static_cast<unsigned>(targetPositions.size() - offset));
-					permuteDup(_n + 1, _getTargetPositions, _swap, _dup, _push, _pop);
+					permuteDup(_n + 1, _getTargetPositions, _swap, _dup, _push, _pop, _debug);
 					return;
 				}
 			}
@@ -193,13 +253,13 @@ void permuteDup(unsigned _n, GetTargetPositions _getTargetPositions, Swap _swap,
 				if (targetPositions.size() > 1)
 				{
 					_dup(static_cast<unsigned>(targetPositions.size() - offset));
-					permuteDup(_n + 1, _getTargetPositions, _swap, _dup, _push, _pop);
+					permuteDup(_n + 1, _getTargetPositions, _swap, _dup, _push, _pop, _debug);
 					return;
 				}
 			}
 			// There must be a new element requested. Request it to be pushed and recurse.
 			_push();
-			permuteDup(_n + 1, _getTargetPositions, _swap, _dup, _push, _pop);
+			permuteDup(_n + 1, _getTargetPositions, _swap, _dup, _push, _pop, _debug);
 			return;
 
 			assertThrow(false, langutil::InternalCompilerError, "Invalid permutation.");

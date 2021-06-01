@@ -79,6 +79,7 @@ set<unsigned> findAllOffsets(Range&& _range, Value&& _value)
 template<typename Swap, typename Dup, typename Pop, typename PushSlot>
 void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _swap, Dup _dup, PushSlot _push, Pop _pop, bool _silent = false)
 {
+	_silent = false;
 	// TODO: this still does not work, if there are duplicates in ``_currentStack``.
 	if (_currentStack == _targetStack)
 		return;
@@ -98,6 +99,8 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 		cxx20::erase_if(positions, [&](unsigned i) -> bool {
 			if (i == _i)
 				return false;
+			if (i > _currentStack.size())
+				return true;
 			return i < _currentStack.size() && i < _targetStack.size() && _currentStack[i] == _targetStack[i];
 		});
 		return positions;
@@ -130,10 +133,12 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 			targetPositions.emplace_back(set<unsigned>{*duppingOffset});
 		}
 	}, [&]() {
-		std::cout << "PUSHING AT SIZE: " << targetPositions.size() << std::endl;
+		if (!_silent)
+			std::cout << "PUSHING AT SIZE: " << targetPositions.size() << std::endl;
 		if (auto newElement = newElements.at(targetPositions.size()))
 		{
-			std::cout << "NEW ELEMENT AT CORRECT POSITION " << stackSlotToString(*newElement) << std::endl;
+			if (!_silent)
+				std::cout << "NEW ELEMENT AT CORRECT POSITION " << stackSlotToString(*newElement) << std::endl;
 			_push(*newElement);
 			_currentStack.emplace_back(*newElement);
 			newElement = nullopt;
@@ -141,12 +146,14 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 		}
 		else
 		{
-			std::cout << "Want: " << stackSlotToString(_targetStack[targetPositions.size()]) << std::endl;
+			if (!_silent)
+				std::cout << "Want: " << stackSlotToString(_targetStack[targetPositions.size()]) << std::endl;
 			for(auto&& [pos, newElement]: newElements | ranges::views::enumerate)
 			{
 				if (newElement)
 				{
-					std::cout << "PUSHING " << stackSlotToString(*newElement) << " TARGETTING " << pos << std::endl;
+					if (!_silent)
+						std::cout << "PUSHING " << stackSlotToString(*newElement) << " TARGETTING " << pos << std::endl;
 					_push(*newElement);
 					_currentStack.emplace_back(*newElement);
 					newElement = nullopt;
@@ -156,7 +163,7 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 			}
 			yulAssert(false, "");
 		}
-	}, [&]() { _pop(); targetPositions.pop_back(); _currentStack.pop_back(); });
+	}, [&]() { _pop(); targetPositions.pop_back(); _currentStack.pop_back(); }, _silent);
 
 	for (auto newSlot: _targetStack | ranges::views::take_last(_targetStack.size() - _currentStack.size()))
 	{
@@ -258,7 +265,7 @@ public:
 	{
 		CodeGenerator generator(_assembly, _builtinContext, _useNamedLabelsForFunctions,  _info);
 		generator(_entry);
-		generator.generateStagedFunctions();
+		generator.generateStaged();
 	}
 private:
 	CodeGenerator(AbstractAssembly& _assembly, BuiltinContext& _builtinContext, bool _useNamedLabelsForFunctions, OptimizedCodeTransformContext const& _info):
@@ -286,13 +293,16 @@ public:
 
 	void operator()(DFG::FunctionInfo const& _functionInfo)
 	{
+		yulAssert(!m_currentFunctionInfo, "");
+		m_currentFunctionInfo = &_functionInfo;
+
 		BlockGenerationInfo const& info = m_info.blockInfos.at(_functionInfo.entry);
 
 		std::cout << std::endl;
 		std::cout << "F: start of function " << _functionInfo.function->name.str() << std::endl;
 		m_stack.clear();
 		m_stack.emplace_back(ReturnLabelSlot{});
-		for (auto const& param: _functionInfo.parameters)
+		for (auto const& param: _functionInfo.parameters | ranges::views::reverse)
 			m_stack.emplace_back(param);
 		m_assembly.setStackHeight(static_cast<int>(m_stack.size()));
 		m_assembly.setSourceLocation(locationOf(_functionInfo));
@@ -303,18 +313,7 @@ public:
 
 		(*this)(*_functionInfo.entry);
 
-		Stack exitStack = _functionInfo.returnVariables | ranges::views::transform([](auto const& _varSlot){
-			return StackSlot{_varSlot};
-		}) | ranges::to<Stack>;
-		exitStack.emplace_back(ReturnLabelSlot{});
-
-		std::cout << "Return from function " << _functionInfo.function->name.str() << std::endl;
-		std::cout << "EXIT STACK: " << stackToString(exitStack) << std::endl;
-		createStackLayout(exitStack);
-		m_assembly.setSourceLocation(locationOf(_functionInfo));
-		m_assembly.appendJump(0, AbstractAssembly::JumpType::OutOfFunction); // TODO: stack height diff.
-		m_assembly.setStackHeight(0);
-		m_stack.clear();
+		m_currentFunctionInfo = nullptr;
 	}
 
 	void operator()(DFG::FunctionCall const& _call)
@@ -385,7 +384,10 @@ public:
 		if (auto label = util::valueOrNullptr(m_blockLabels, &_block))
 			m_assembly.appendLabel(*label);
 
-		std::cout << "F: GENERATING: " << &_block << std::endl;
+		{
+			auto label = util::valueOrNullptr(m_blockLabels, &_block);
+			std::cout << "F: GENERATING: " << &_block << " (label: " << (label ? std::to_string(*label) : "NONE") << ")" << std::endl;
+		}
 
 		std::cout << "F: CREATING ENTRY LAYOUT " << stackToString(info.entryLayout) << " FROM " << stackToString(m_stack) << std::endl;
 		createStackLayout(info.entryLayout);
@@ -398,7 +400,7 @@ public:
 			// TODO: is this actually necessary each time? Last time is probably enough, if at all needed.
 			// createStackLayout(operationInfo.exitStack);
 		}
-		//createStackLayout(info.exitLayout);
+		createStackLayout(info.exitLayout);
 
 		std::cout << std::endl << std::endl;
 		std::cout << "F: EXIT LAYOUT (" << &_block << "): " << stackToString(info.exitLayout) << " == " << stackToString(m_stack) << std::endl;
@@ -418,7 +420,7 @@ public:
 
 				BlockGenerationInfo const& targetInfo = m_info.blockInfos.at(_jump.target);
 				std::cout << "F: CURRENT " << stackToString(m_stack) << " => " << stackToString(targetInfo.entryLayout) << std::endl;
-//				createStackLayout(targetInfo.entryLayout);
+				createStackLayout(targetInfo.entryLayout);
 
 				if (!m_blockLabels.count(_jump.target) && _jump.target->entries.size() == 1)
 					(*this)(*_jump.target);
@@ -427,10 +429,10 @@ public:
 					if (!m_blockLabels.count(_jump.target))
 						m_blockLabels[_jump.target] = m_assembly.newLabelId();
 
-					if (m_generated.count(_jump.target))
-						m_assembly.appendJumpTo(m_blockLabels[_jump.target]);
-					else
-						(*this)(*_jump.target);
+					yulAssert(m_stack == m_info.blockInfos.at(_jump.target).entryLayout, "");
+					m_assembly.appendJumpTo(m_blockLabels[_jump.target]);
+					if (!m_generated.count(_jump.target))
+						m_stagedBlocks.emplace_back(_jump.target);
 				}
 			},
 			[&](DFG::BasicBlock::ConditionalJump const& _conditionalJump)
@@ -461,29 +463,36 @@ public:
 					m_blockLabels[_conditionalJump.nonZero] = m_assembly.newLabelId();
 				m_assembly.appendJumpToIf(m_blockLabels[_conditionalJump.nonZero]);
 				m_stack.pop_back();
+				yulAssert(m_stack == m_info.blockInfos.at(_conditionalJump.nonZero).entryLayout, "");
 
-				{
-					ScopedSaveAndRestore stackRestore(m_stack, Stack{m_stack});
-					if (!m_blockLabels.count(_conditionalJump.zero) && _conditionalJump.zero->entries.size() == 1)
-						(*this)(*_conditionalJump.zero);
-					else
-					{
-						if (!m_blockLabels.count(_conditionalJump.zero))
-							m_blockLabels[_conditionalJump.zero] = m_assembly.newLabelId();
+				if (!m_generated.count(_conditionalJump.nonZero))
+					m_stagedBlocks.emplace_back(_conditionalJump.nonZero);
 
-						if (m_generated.count(_conditionalJump.zero))
-							m_assembly.appendJumpTo(m_blockLabels[_conditionalJump.zero]);
-						else
-							(*this)(*_conditionalJump.zero);
-					}
-				}
-				m_assembly.setStackHeight(static_cast<int>(m_stack.size()));
-
-				(*this)(*_conditionalJump.nonZero);
+				if (!m_blockLabels.count(_conditionalJump.zero))
+					m_blockLabels[_conditionalJump.zero] = m_assembly.newLabelId();
+				if (m_generated.count(_conditionalJump.zero))
+					m_assembly.appendJumpTo(m_blockLabels[_conditionalJump.zero]);
+				else
+					(*this)(*_conditionalJump.zero);
 			},
 			[&](DFG::BasicBlock::FunctionReturn const& _functionReturn)
 			{
 				std::cout << "F: Function return exit: " << _functionReturn.info->function->name.str() << std::endl;
+
+				yulAssert(m_currentFunctionInfo, "");
+				Stack exitStack = m_currentFunctionInfo->returnVariables | ranges::views::transform([](auto const& _varSlot){
+					return StackSlot{_varSlot};
+				}) | ranges::to<Stack>;
+				exitStack.emplace_back(ReturnLabelSlot{});
+
+				std::cout << "Return from function " << m_currentFunctionInfo->function->name.str() << std::endl;
+				std::cout << "EXIT STACK: " << stackToString(exitStack) << std::endl;
+				createStackLayout(exitStack);
+				m_assembly.setSourceLocation(locationOf(*m_currentFunctionInfo));
+				m_assembly.appendJump(0, AbstractAssembly::JumpType::OutOfFunction); // TODO: stack height diff.
+				m_assembly.setStackHeight(0);
+				m_stack.clear();
+
 			},
 			[&](DFG::BasicBlock::Revert const&)
 			{
@@ -529,23 +538,49 @@ public:
 				[&](auto const& _slot)
 				{
 					std::cout << "SLOT: " << stackSlotToString(StackSlot{_slot}) << std::endl;
-					yulAssert(false, "Slot not found.");
+					std::cout << "THIS SHOULD NOT HAPPEN!" << std::endl;
+					m_assembly.appendInstruction(evmasm::Instruction::CALLDATASIZE);
+					//yulAssert(false, "Slot not found.");
 				}
 			}, _slot);
 		}, [&]() { m_assembly.appendInstruction(evmasm::Instruction::POP); });
 	}
 private:
 
-	void generateStagedFunctions()
+	void generateStaged()
 	{
+		while (!m_stagedBlocks.empty())
+		{
+			DFG::BasicBlock const* _block = *m_stagedBlocks.begin();
+			m_stagedBlocks.pop_front();
+			m_stack = m_info.blockInfos.at(_block).entryLayout;
+			m_assembly.setStackHeight(static_cast<int>(m_stack.size()));
+			(*this)(*_block);
+			// TODO: assert that this block jumped at exit.
+		}
 		while (!m_stagedFunctions.empty())
 		{
-			DFG::FunctionInfo const* _functionInfo = *m_stagedFunctions.begin();
-			m_stagedFunctions.pop_front();
-			if (!m_generatedFunctions.count(_functionInfo))
+			while (!m_stagedFunctions.empty())
 			{
-				m_generatedFunctions.emplace(_functionInfo);
-				(*this)(*_functionInfo);
+				DFG::FunctionInfo const* _functionInfo = *m_stagedFunctions.begin();
+				m_stagedFunctions.pop_front();
+				if (!m_generatedFunctions.count(_functionInfo))
+				{
+					m_generatedFunctions.emplace(_functionInfo);
+					(*this)(*_functionInfo);
+				}
+				yulAssert(!m_currentFunctionInfo, "");
+				m_currentFunctionInfo = _functionInfo;
+				while (!m_stagedBlocks.empty())
+				{
+					DFG::BasicBlock const* _block = *m_stagedBlocks.begin();
+					m_stagedBlocks.pop_front();
+					m_stack = m_info.blockInfos.at(_block).entryLayout;
+					m_assembly.setStackHeight(static_cast<int>(m_stack.size()));
+					(*this)(*_block);
+					// TODO: assert that this block jumped at exit.
+				}
+				m_currentFunctionInfo = nullptr;
 			}
 		}
 	}
@@ -559,8 +594,10 @@ private:
 	std::map<DFG::BasicBlock const*, AbstractAssembly::LabelID> m_blockLabels;
 	std::map<DFG::FunctionInfo const*, AbstractAssembly::LabelID> m_functionLabels;
 	std::set<DFG::BasicBlock const*> m_generated;
+	std::deque<DFG::BasicBlock const*> m_stagedBlocks;
 	std::list<DFG::FunctionInfo const*> m_stagedFunctions;
 	std::set<DFG::FunctionInfo const*> m_generatedFunctions;
+	DFG::FunctionInfo const* m_currentFunctionInfo = nullptr;
 };
 
 class StackLayoutGenerator
@@ -568,7 +605,7 @@ class StackLayoutGenerator
 public:
 	StackLayoutGenerator(OptimizedCodeTransformContext& _context);
 
-	Stack operator()(DFG::BasicBlock const& _block);
+	Stack operator()(DFG::BasicBlock const& _block, Stack _exitLayout = {});
 
 	void operator()(DFG::Operation const& _operation);
 
@@ -578,14 +615,12 @@ public:
 
 private:
 
-	void visit(DFG::BasicBlock const& _block);
-
 	OptimizedCodeTransformContext& m_context;
 
 	Stack* m_stack;
 
 	// TODO: name!
-	std::set<DFG::BasicBlock const*> m_currentPath;
+	std::map<DFG::BasicBlock const*, std::set<StackSlot>> m_exitSlotsSeen;
 
 	Stack combineStack(Stack const& _stack1, Stack const& _stack2);
 };
@@ -734,73 +769,94 @@ void StackLayoutGenerator::operator()(DFG::Operation const& _operation)
 	std::cout << "Operation pre after compress: " << stackToString(*m_stack) << "   " << m_stack << std::endl;
 }
 
-Stack StackLayoutGenerator::operator()(DFG::BasicBlock const& _block)
+Stack StackLayoutGenerator::operator()(DFG::BasicBlock const& _block, Stack _exitLayout)
 {
 	ScopedSaveAndRestore stackRestore(m_stack, nullptr);
 	BlockGenerationInfo& info = m_context.blockInfos[&_block];
 
-	std::cout << "B: BLOCK: " << &_block << std::endl;
-	Stack currentStack;
-	if (!m_currentPath.count(&_block))
+	Stack currentStack = _exitLayout;
+	if (auto const* slotsSeen = util::valueOrNullptr(m_exitSlotsSeen, &_block))
 	{
-		ScopedSaveAndRestore pathRestore(m_currentPath, m_currentPath + set<DFG::BasicBlock const*>{&_block});
-		std::visit(util::GenericVisitor{
-			[&](std::monostate)
+		bool seenAll = true;
+		for (auto& slot: _exitLayout)
+		{
+			if (!slotsSeen->count(slot))
 			{
-			},
-			[&](DFG::BasicBlock::Jump const& _jump)
-			{
-				currentStack = combineStack(currentStack, (*this)(*_jump.target));
-				BlockGenerationInfo& targetInfo = m_context.blockInfos.at(_jump.target);
-				targetInfo.entryLayout = currentStack;
-				/*
-				if (!targetInfo.entryLayout.has_value())
-				{
-					// We're in a loop. We must have jumped here conditionally:
-					auto const* conditionalJump = get_if<DFG::BasicBlock::ConditionalJump>(&_jump.target->exit);
-					yulAssert(conditionalJump, "");
-					std::cout << "Current " << &_block << " conditonals: " << conditionalJump->zero << " " << conditionalJump->nonZero << std::endl;
-					{
-						BlockGenerationInfo& zeroEntryInfo = m_context.blockInfos.at(conditionalJump->zero);
-						BlockGenerationInfo& nonZeroEntryInfo = m_context.blockInfos.at(conditionalJump->nonZero);
-						// One branch must already have an entry layout, the other is the looping branch.
-						yulAssert(zeroEntryInfo.entryLayout.has_value() != nonZeroEntryInfo.entryLayout.has_value(), "");
-
-						auto layout = zeroEntryInfo.entryLayout ? zeroEntryInfo.entryLayout : nonZeroEntryInfo.entryLayout;
-						yulAssert(layout.has_value(), "");
-						std::cout << "Looping entry layout: " << stackToString(*layout) << std::endl;
-						std::cout << "Zero has value: " << zeroEntryInfo.entryLayout.has_value() << std::endl;
-						std::cout << "Non-Zero has value: " << nonZeroEntryInfo.entryLayout.has_value() << std::endl;
-
-
-					}
-				}
-				yulAssert(targetInfo.entryLayout.has_value(), "");
-				currentStack = *targetInfo.entryLayout;*/
-			},
-			[&](DFG::BasicBlock::ConditionalJump const& _conditionalJump)
-			{
-				Stack zeroEntryStack = (*this)(*_conditionalJump.zero);
-				Stack nonZeroEntryStack = (*this)(*_conditionalJump.nonZero);
-				currentStack = combineStack(zeroEntryStack, nonZeroEntryStack);
-				BlockGenerationInfo& zeroInfo = m_context.blockInfos.at(_conditionalJump.zero);
-				BlockGenerationInfo& nonZeroInfo = m_context.blockInfos.at(_conditionalJump.nonZero);
-				zeroInfo.entryLayout = currentStack;
-				nonZeroInfo.entryLayout = currentStack;
-				currentStack.emplace_back(_conditionalJump.condition);
-			},
-			[&](DFG::BasicBlock::FunctionReturn const& _functionReturn)
-			{
-				yulAssert(_functionReturn.info, "");
-				currentStack = _functionReturn.info->returnVariables | ranges::views::transform([](auto const& _varSlot){
-					return StackSlot{_varSlot};
-				}) | ranges::to<Stack>;
-				currentStack.emplace_back(ReturnLabelSlot{});
-			},
-			[](DFG::BasicBlock::Stop const&) { yulAssert(false, "STOP EXIT"); },
-			[](DFG::BasicBlock::Revert const&) { yulAssert(false, "REVERT EXIT"); }
-		}, _block.exit);
+				std::cout << "UNSEEN SLOT: " << stackSlotToString(slot) << std::endl;
+				seenAll = false;
+			}
+		}
+		if (seenAll)
+			return info.entryLayout;
 	}
+	{
+		auto& exitSlotsSeen = m_exitSlotsSeen[&_block];
+		for (auto& slot: _exitLayout)
+			exitSlotsSeen.insert(slot);
+	}
+
+	std::visit(util::GenericVisitor{
+		[&](std::monostate)
+		{
+		},
+		[&](DFG::BasicBlock::Jump const& _jump)
+		{
+			currentStack = combineStack(currentStack, (*this)(*_jump.target, {}));
+			BlockGenerationInfo& targetInfo = m_context.blockInfos.at(_jump.target);
+			targetInfo.entryLayout = currentStack;
+
+			std::cout << "B: JUMP EXIT: " << _jump.target << std::endl;
+			/*
+			if (!targetInfo.entryLayout.has_value())
+			{
+				// We're in a loop. We must have jumped here conditionally:
+				auto const* conditionalJump = get_if<DFG::BasicBlock::ConditionalJump>(&_jump.target->exit);
+				yulAssert(conditionalJump, "");
+				std::cout << "Current " << &_block << " conditonals: " << conditionalJump->zero << " " << conditionalJump->nonZero << std::endl;
+				{
+					BlockGenerationInfo& zeroEntryInfo = m_context.blockInfos.at(conditionalJump->zero);
+					BlockGenerationInfo& nonZeroEntryInfo = m_context.blockInfos.at(conditionalJump->nonZero);
+					// One branch must already have an entry layout, the other is the looping branch.
+					yulAssert(zeroEntryInfo.entryLayout.has_value() != nonZeroEntryInfo.entryLayout.has_value(), "");
+
+					auto layout = zeroEntryInfo.entryLayout ? zeroEntryInfo.entryLayout : nonZeroEntryInfo.entryLayout;
+					yulAssert(layout.has_value(), "");
+					std::cout << "Looping entry layout: " << stackToString(*layout) << std::endl;
+					std::cout << "Zero has value: " << zeroEntryInfo.entryLayout.has_value() << std::endl;
+					std::cout << "Non-Zero has value: " << nonZeroEntryInfo.entryLayout.has_value() << std::endl;
+
+
+				}
+			}
+			yulAssert(targetInfo.entryLayout.has_value(), "");
+			currentStack = *targetInfo.entryLayout;*/
+		},
+		[&](DFG::BasicBlock::ConditionalJump const& _conditionalJump)
+		{
+			Stack zeroEntryStack = (*this)(*_conditionalJump.zero, {});
+			Stack nonZeroEntryStack = (*this)(*_conditionalJump.nonZero, {});
+			currentStack = combineStack(zeroEntryStack, nonZeroEntryStack);
+			BlockGenerationInfo& zeroInfo = m_context.blockInfos.at(_conditionalJump.zero);
+			BlockGenerationInfo& nonZeroInfo = m_context.blockInfos.at(_conditionalJump.nonZero);
+			zeroInfo.entryLayout = currentStack;
+			nonZeroInfo.entryLayout = currentStack;
+			currentStack.emplace_back(_conditionalJump.condition);
+
+			std::cout << "B: CONDITIONAL JUMP EXIT: " << _conditionalJump.zero << " / " << _conditionalJump.nonZero << std::endl;
+		},
+		[&](DFG::BasicBlock::FunctionReturn const& _functionReturn)
+		{
+			yulAssert(_functionReturn.info, "");
+			currentStack = _functionReturn.info->returnVariables | ranges::views::transform([](auto const& _varSlot){
+				return StackSlot{_varSlot};
+			}) | ranges::to<Stack>;
+			currentStack.emplace_back(ReturnLabelSlot{});
+		},
+		[](DFG::BasicBlock::Stop const&) { yulAssert(false, "STOP EXIT"); },
+		[](DFG::BasicBlock::Revert const&) { yulAssert(false, "REVERT EXIT"); }
+	}, _block.exit);
+
+	std::cout << "B: BLOCK: " << &_block << std::endl;
 
 	m_stack = &currentStack;
 	info.exitLayout = currentStack;
@@ -813,7 +869,24 @@ Stack StackLayoutGenerator::operator()(DFG::BasicBlock const& _block)
 	std::cout << "B: ENTRY LAYOUT (" << &_block << "): " << stackToString(currentStack) << std::endl;
 
 	info.entryLayout = currentStack;
-	return currentStack;
+
+	for (auto const* entry: _block.entries)
+		if (holds_alternative<DFG::BasicBlock::ConditionalJump>(entry->exit))
+		{
+			(*this)(*entry, currentStack);
+			auto exitLayout = m_context.blockInfos.at(entry).exitLayout;
+			if (!exitLayout.empty())
+				exitLayout.pop_back();
+			info.entryLayout = combineStack(info.entryLayout, exitLayout);
+		}
+		else if (holds_alternative<DFG::BasicBlock::Jump>(entry->exit))
+		{
+			(*this)(*entry, currentStack);
+			auto exitLayout = m_context.blockInfos.at(entry).exitLayout;
+			info.entryLayout = combineStack(info.entryLayout, exitLayout);
+		}
+
+	return info.entryLayout;
 }
 
 Stack StackLayoutGenerator::combineStack(Stack const& _stack1, Stack const& _stack2)
@@ -843,7 +916,7 @@ Stack StackLayoutGenerator::combineStack(Stack const& _stack1, Stack const& _sta
 			[&](unsigned) { ++numOps; },
 			[&](StackSlot const&) {},
 			[&](){},
-			false
+			true
 		);
 		testStack = _candidate;
 		createStackLayout(
@@ -853,9 +926,9 @@ Stack StackLayoutGenerator::combineStack(Stack const& _stack1, Stack const& _sta
 			[&](unsigned) { ++numOps; },
 			[&](StackSlot const&) {},
 			[&](){},
-			false
+			true
 		);
-		std::cout << "  CANDIDATE: " << stackToString(_candidate) << ": " << numOps << " swaps." << std::endl;
+		// std::cout << "  CANDIDATE: " << stackToString(_candidate) << ": " << numOps << " swaps." << std::endl;
 		return numOps;
 	};
 
