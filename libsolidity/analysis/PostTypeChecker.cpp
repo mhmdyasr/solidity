@@ -131,6 +131,16 @@ void PostTypeChecker::endVisit(ModifierInvocation const& _modifierInvocation)
 	callEndVisit(_modifierInvocation);
 }
 
+bool PostTypeChecker::visit(FunctionDefinition const& _functionDefinition)
+{
+	return callVisit(_functionDefinition);
+}
+
+void PostTypeChecker::endVisit(FunctionDefinition const& _functionDefinition)
+{
+	callEndVisit(_functionDefinition);
+}
+
 namespace
 {
 struct ConstStateVarCircularReferenceChecker: public PostTypeChecker::Checker
@@ -434,4 +444,5 @@ PostTypeChecker::PostTypeChecker(langutil::ErrorReporter& _errorReporter): m_err
 	m_checkers.push_back(make_shared<EventOutsideEmitErrorOutsideRevertChecker>(_errorReporter));
 	m_checkers.push_back(make_shared<NoVariablesInInterfaceChecker>(_errorReporter));
 	m_checkers.push_back(make_shared<ReservedErrorSelector>(_errorReporter));
+	//m_checkers.push_back(make_shared<ModifierImplementedChecker>(_errorReporter));
 }
