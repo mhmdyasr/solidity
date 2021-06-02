@@ -86,6 +86,131 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 	if (!_silent)
 		std::cout << "CREATE STACK LAYOUT: " << stackToString(_targetStack) << " FROM " << stackToString(_currentStack) << std::endl;
 
+	if (_currentStack.empty())
+	{
+		while(_currentStack.size() < _targetStack.size())
+		{
+			StackSlot newSlot = _targetStack.at(_currentStack.size());
+			_push(newSlot);
+			_currentStack.emplace_back(newSlot);
+		}
+		yulAssert(_currentStack == _targetStack, "");
+		return;
+	}
+
+	auto topTargets = findAllOffsets(_targetStack, _currentStack.back());
+	if (topTargets.empty())
+	{
+		if (!_silent)
+			std::cout << "POP TOP" << std::endl;
+		_pop();
+		_currentStack.pop_back();
+		createStackLayout(_currentStack, _targetStack, _swap, _dup, _push, _pop, _silent);
+		return;
+	}
+	else if (_targetStack.size() >= _currentStack.size() && _targetStack.at(_currentStack.size() - 1) == _currentStack.back())
+	{
+		if (!_silent)
+			std::cout << "TOP is in place" << std::endl;
+
+		// Current top is in place.
+		// Dup deepest one to be dupped (TODO: choose optimal).
+		for(auto&& [offset, slot]: _currentStack | ranges::views::enumerate)
+		{
+			if (findAllOffsets(_currentStack, slot).size() < findAllOffsets(_targetStack, slot).size())
+			{
+				if (!_silent)
+					std::cout << "DUP" << std::endl;
+
+				_dup(static_cast<unsigned>(_currentStack.size() - offset));
+				_currentStack.emplace_back(_currentStack.at(offset));
+				createStackLayout(_currentStack, _targetStack, _swap, _dup, _push, _pop, _silent);
+				return;
+			}
+		}
+		// Nothing to dup. Find anything to be pushed and push it.
+		for(auto const& slot: _targetStack)
+		{
+			if (!util::findOffset(_currentStack, slot))
+			{
+				if (!_silent)
+					std::cout << "PUSH" << std::endl;
+				_push(slot);
+				_currentStack.emplace_back(slot);
+				createStackLayout(_currentStack, _targetStack, _swap, _dup, _push, _pop, _silent);
+				return;
+			}
+		}
+		// Nothing to push or dup.
+		// Swap the deepest one that's not in place up.
+		for (auto&& [offset, slot]: _currentStack | ranges::views::enumerate)
+		{
+			if (!(slot == _targetStack.at(offset)) && !(slot == _currentStack.back()))
+			{
+				if (!_silent)
+					std::cout << "SWAP " << offset << std::endl;
+				_swap(static_cast<unsigned>(_currentStack.size() - offset - 1));
+				std::swap(_currentStack.back(), _currentStack.at(offset));
+				createStackLayout(_currentStack, _targetStack, _swap, _dup, _push, _pop, _silent);
+				return;
+			}
+		}
+		// Nothing to push or dup and nothing out of place => done.
+		yulAssert(_currentStack == _targetStack, "");
+		return;
+	}
+	else
+	{
+		if (!_silent)
+			std::cout << "TOP is not in place" << std::endl;
+
+		for (unsigned deepestTopTarget: topTargets)
+		{
+			if (deepestTopTarget >= _currentStack.size())
+				break;
+			if (!(_currentStack.at(deepestTopTarget) == _targetStack.at(deepestTopTarget)))
+			{
+				if (!_silent)
+					std::cout << "Move into place " << deepestTopTarget << std::endl;
+
+				// Move top into place.
+				_swap(static_cast<unsigned>(_currentStack.size() - deepestTopTarget - 1));
+				std::swap(_currentStack.back(), _currentStack.at(deepestTopTarget));
+				createStackLayout(_currentStack, _targetStack, _swap, _dup, _push, _pop, _silent);
+				return;
+			}
+		}
+
+		// There needs to be something to dup or push. Try dupping. (TODO: suboptimal)
+		for(auto&& [offset, slot]: _currentStack | ranges::views::enumerate)
+		{
+			if (findAllOffsets(_currentStack, slot).size() < findAllOffsets(_targetStack, slot).size())
+			{
+				if (!_silent)
+					std::cout << "DUP " << offset << std::endl;
+				_dup(static_cast<unsigned>(_currentStack.size() - offset));
+				_currentStack.emplace_back(_currentStack.at(offset));
+				createStackLayout(_currentStack, _targetStack, _swap, _dup, _push, _pop, _silent);
+				return;
+			}
+		}
+		// Nothing to dup. Find anything to be pushed and push it.
+		for(auto const& slot: _targetStack)
+		{
+			if (!util::findOffset(_currentStack, slot))
+			{
+				if (!_silent)
+					std::cout << "PUSH" << std::endl;
+				_push(slot);
+				_currentStack.template emplace_back(slot);
+				createStackLayout(_currentStack, _targetStack, _swap, _dup, _push, _pop, _silent);
+				return;
+			}
+		}
+		yulAssert(false, "");
+	}
+
+/*
 	vector<set<unsigned>> targetPositions;
 	for(auto const& currentElement: _currentStack)
 		targetPositions.emplace_back(findAllOffsets(_targetStack, currentElement));
@@ -99,8 +224,6 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 		cxx20::erase_if(positions, [&](unsigned i) -> bool {
 			if (i == _i)
 				return false;
-			if (i > _currentStack.size())
-				return true;
 			return i < _currentStack.size() && i < _targetStack.size() && _currentStack[i] == _targetStack[i];
 		});
 		return positions;
@@ -170,7 +293,7 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 		_push(newSlot);
 		_currentStack.emplace_back(newSlot);
 	}
-
+*/
 #if 0
 	auto cleanStackTop = [&]() {
 		while (!_currentStack.empty() && (holds_alternative<JunkSlot>(_currentStack.back()) || !util::findOffset(_targetStack, _currentStack.back())))
@@ -512,7 +635,7 @@ public:
 	void createStackLayout(Stack _targetStack)
 	{
 		std::cout << "F: CREATE " << stackToString(_targetStack) << " FROM " << stackToString(m_stack) << std::endl;
-		::createStackLayout(m_stack, move(_targetStack), [&](unsigned _i) {
+		::createStackLayout(m_stack, _targetStack, [&](unsigned _i) {
 			m_assembly.appendInstruction(evmasm::swapInstruction(_i));
 		}, [&](unsigned _i) {
 			m_assembly.appendInstruction(evmasm::dupInstruction(_i));
