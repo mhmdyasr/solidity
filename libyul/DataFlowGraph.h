@@ -35,9 +35,10 @@ struct ReturnLabelSlot
 {
 	/// The call returning to this label or, when generating a function, nullptr for the label to which the function
 	/// is supposed to return.
-	yul::FunctionCall const* call = nullptr;
-	bool operator==(ReturnLabelSlot const& _rhs) const { return call == _rhs.call; }
-	bool operator<(ReturnLabelSlot const& _rhs) const { return call < _rhs.call; }
+	//yul::FunctionCall const* call = nullptr;
+	std::optional<size_t> callID;
+	bool operator==(ReturnLabelSlot const& _rhs) const { return callID == _rhs.callID; }
+	bool operator<(ReturnLabelSlot const& _rhs) const { return callID < _rhs.callID; }
 };
 struct VariableSlot
 {
@@ -55,10 +56,11 @@ struct LiteralSlot
 };
 struct TemporarySlot
 {
-	yul::FunctionCall const* call = nullptr;
+	// yul::FunctionCall const* call = nullptr;
+	size_t callID = std::numeric_limits<size_t>::max();
 	size_t idx = 0;
-	bool operator==(TemporarySlot const& _rhs) const { return call == _rhs.call && idx == _rhs.idx; }
-	bool operator<(TemporarySlot const& _rhs) const { return std::make_pair(call, idx) < std::make_pair(_rhs.call, _rhs.idx); }
+	bool operator==(TemporarySlot const& _rhs) const { return callID == _rhs.callID && idx == _rhs.idx; }
+	bool operator<(TemporarySlot const& _rhs) const { return std::make_pair(callID, idx) < std::make_pair(_rhs.callID, _rhs.idx); }
 };
 struct JunkSlot
 {
@@ -81,6 +83,7 @@ struct DFG
 		std::shared_ptr<DebugData const> debugData;
 		BuiltinFunctionForEVM const* builtin = nullptr;
 		yul::FunctionCall const* functionCall = nullptr;
+		size_t functionCallID = std::numeric_limits<size_t>::max();
 		size_t arguments = 0;
 	};
 	struct FunctionCall
@@ -88,6 +91,7 @@ struct DFG
 		std::shared_ptr<DebugData const> debugData;
 		Scope::Function const* function = nullptr;
 		yul::FunctionCall const* functionCall = nullptr;
+		size_t functionCallID = std::numeric_limits<size_t>::max();
 	};
 	struct Assignment
 	{
@@ -106,6 +110,7 @@ struct DFG
 	struct BasicBlock
 	{
 		std::vector<BasicBlock const*> entries;
+		std::vector<BasicBlock const*> backwardEntries;
 		std::vector<Operation> operations;
 		struct ConditionalJump
 		{
@@ -116,15 +121,17 @@ struct DFG
 		struct Jump
 		{
 			BasicBlock* target = nullptr;
+			bool backwards = false;
 		};
 		struct FunctionReturn { DFG::FunctionInfo* info = nullptr; };
-		struct Stop {};
-		struct Revert {};
-		std::variant<std::monostate, Jump, ConditionalJump, FunctionReturn, Stop, Revert> exit;
+		struct Terminated {};
+		std::variant<std::monostate, Jump, ConditionalJump, FunctionReturn, Terminated> exit;
 	};
 	std::list<BasicBlock> blocks;
 	std::list<Scope::Variable> ghostVariables;
 	std::list<yul::FunctionCall> ghostCalls;
+	std::map<yul::FunctionCall const*, size_t> functionCallIDs;
+	std::vector<yul::FunctionCall const*> functionCallsByID;
 
 	struct FunctionInfo
 	{
@@ -137,7 +144,6 @@ struct DFG
 	};
 	std::map<Scope::Function const*, FunctionInfo> functions;
 	BasicBlock* entry = nullptr;
-	std::set<BasicBlock*> exits;
 
 	BasicBlock& makeBlock()
 	{
@@ -179,7 +185,7 @@ private:
 	Scope::Variable const& lookupVariable(YulString _name) const;
 	std::pair<DFG::BasicBlock*, DFG::BasicBlock*> makeConditionalJump(StackSlot _condition);
 	void makeConditionalJump(StackSlot _condition, DFG::BasicBlock& _nonZero, DFG::BasicBlock& _zero);
-	void jump(DFG::BasicBlock& _target);
+	void jump(DFG::BasicBlock& _target, bool _backwards = false);
 	DFG& m_graph;
 	AsmAnalysisInfo& m_info;
 	EVMDialect const& m_dialect;

@@ -74,54 +74,6 @@ void permute(unsigned _n, GetTargetPosition _getTargetPosition, Swap _swap, Pop 
 	}
 }
 
-template<typename CurrentContainer, typename TargetContainer, typename Compare, typename Swap, typename Dup, typename Generate, typename Pop>
-void permuteNew(CurrentContainer& _current, TargetContainer& _target, Compare _compare, Swap _swap, Dup _dup, Generate _generate, Pop _pop)
-{
-	if (_current.size() > _target.size())
-	{
-		for (auto&& [offset, targetSlot]: _target | ranges::views::enumerate)
-			if (_compare(_current.back(), targetSlot))
-			{
-				_swap(_current.size() - offset - 1);
-				std::swap(_current.back(), _current.at(offset));
-				permuteNew(_current, _target, _compare, _swap, _dup, _generate, _pop);
-				return;
-			}
-		_pop();
-		_current.pop_back();
-		permuteNew(_current, _target, _compare, _swap, _dup, _generate, _pop);
-		return;
-	}
-
-	if (_compare(_current.back(), _target.at(_current.size() - 1)))
-	{
-		for (auto&& [targetOffset, targetSlot]: _target | ranges::views::enumerate)
-			if (!_compare(_current.back(), targetSlot))
-			{
-				for (auto&& [currentOffset, currentSlot]: _current | ranges::views::enumerate)
-				{
-					if (!_compare(currentSlot, _target.at(currentOffset)))
-					{
-
-					}
-				}
-			}
-
-	}
-	else
-	{
-		for (auto&& [targetOffset, targetSlot]: _target | ranges::views::enumerate)
-			if (_compare(_current.back(), targetSlot))
-			{
-				_swap(_current.size() - targetOffset - 1);
-				std::swap(_current.back(), _current.at(targetOffset));
-				permuteNew(_current, _target, _compare, _swap, _dup, _generate, _pop);
-				return;
-			}
-		// There must be an element on the current stack that needs to be dupped.
-	}
-}
-
 template<typename GetTargetPositions, typename Swap, typename Dup, typename Push, typename Pop>
 void permuteDup(unsigned _n, GetTargetPositions _getTargetPositions, Swap _swap, Dup _dup, Push _push, Pop _pop, bool _debug = false)
 {

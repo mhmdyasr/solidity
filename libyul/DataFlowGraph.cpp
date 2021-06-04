@@ -23,6 +23,7 @@
 #include <libsolutil/cxx20.h>
 #include <libsolutil/Permutations.h>
 #include <libsolutil/Visitor.h>
+#include <libsolutil/Algorithms.h>
 
 #include <range/v3/range/conversion.hpp>
 #include <range/v3/view/enumerate.hpp>
@@ -51,8 +52,35 @@ std::unique_ptr<DFG> DataFlowGraphBuilder::build(
 	DataFlowGraphBuilder builder(*result, _analysisInfo, _dialect);
 	builder.m_currentBlock = result->entry;
 	builder(_block);
-	result->exits = builder.m_exits;
-	result->exits.insert(builder.m_currentBlock);
+
+	util::BreadthFirstSearch<DFG::BasicBlock*> reachabilityCheck{{result->entry}};
+	for (auto const& functionInfo: result->functions | ranges::views::values)
+		reachabilityCheck.verticesToTraverse.emplace_back(functionInfo.entry);
+
+	reachabilityCheck.run([&](DFG::BasicBlock* _node, auto&& _addChild) {
+		visit(util::GenericVisitor{
+			[&](DFG::BasicBlock::Jump& _jump) {
+				_addChild(_jump.target);
+			},
+			[&](DFG::BasicBlock::ConditionalJump& _jump) {
+				_addChild(_jump.zero);
+				_addChild(_jump.nonZero);
+			},
+			[](DFG::BasicBlock::FunctionReturn&) {},
+			[](DFG::BasicBlock::Terminated&) {},
+			[](std::monostate) {}
+		}, _node->exit);
+	});
+
+	for (auto* node: reachabilityCheck.visited)
+	{
+		cxx20::erase_if(node->entries, [&](DFG::BasicBlock const* entry) -> bool {
+			return !reachabilityCheck.visited.count(const_cast<DFG::BasicBlock*>(entry)); // TODO
+		});
+		cxx20::erase_if(node->backwardEntries, [&](DFG::BasicBlock const* entry) -> bool {
+			return !reachabilityCheck.visited.count(const_cast<DFG::BasicBlock*>(entry)); // TODO
+		});
+	}
 
 	return result;
 }
@@ -83,6 +111,10 @@ DFG::Operation& DataFlowGraphBuilder::visitFunctionCall(FunctionCall const& _cal
 	yulAssert(m_scope, "");
 	yulAssert(m_currentBlock, "");
 
+	size_t callID = m_graph.functionCallsByID.size();
+	yulAssert(m_graph.functionCallIDs.insert(std::make_pair(&_call, callID)).second, "Visited function call twice.");
+	m_graph.functionCallsByID.emplace_back(&_call);
+
 	if (BuiltinFunctionForEVM const* builtin = m_dialect.builtin(_call.functionName.name))
 	{
 		DFG::Operation& operation = m_currentBlock->operations.emplace_back(DFG::Operation{
@@ -96,11 +128,11 @@ DFG::Operation& DataFlowGraphBuilder::visitFunctionCall(FunctionCall const& _cal
 				return std::visit(*this, _expression);
 			})) | ranges::to<Stack>,
 			{},
-			DFG::BuiltinCall{_call.debugData, builtin, &_call},
+			DFG::BuiltinCall{_call.debugData, builtin, &_call, callID},
 		});
 		std::get<DFG::BuiltinCall>(operation.operation).arguments = operation.input.size();
 		for (size_t i: ranges::views::iota(0u, builtin->returns.size()))
-			operation.output.emplace_back(TemporarySlot{&_call, i});
+			operation.output.emplace_back(TemporarySlot{callID, i});
 		return operation;
 	}
 	else
@@ -112,16 +144,16 @@ DFG::Operation& DataFlowGraphBuilder::visitFunctionCall(FunctionCall const& _cal
 		}), "Function name not found.");
 		yulAssert(function, "");
 		Stack inputs;
-		inputs.emplace_back(ReturnLabelSlot{&_call});
+		inputs.emplace_back(ReturnLabelSlot{callID});
 		for (Expression const& _expression: _call.arguments | ranges::views::reverse)
 			inputs.emplace_back(std::visit(*this, _expression));
 		DFG::Operation& operation = m_currentBlock->operations.emplace_back(DFG::Operation{
 			inputs,
 			{},
-			DFG::FunctionCall{_call.debugData, function, &_call}
+			DFG::FunctionCall{_call.debugData, function, &_call, callID}
 		});
 		for (size_t i: ranges::views::iota(0u, function->returns.size()))
-			operation.output.emplace_back(TemporarySlot{&_call, i});
+			operation.output.emplace_back(TemporarySlot{callID, i});
 		return operation;
 	}
 }
@@ -207,6 +239,14 @@ void DataFlowGraphBuilder::operator()(ExpressionStatement const& _exprStmt)
 		},
 		[&](auto const&) { yulAssert(false, ""); }
 	}, _exprStmt.expression);
+
+	if (auto const* funCall = get_if<FunctionCall>(&_exprStmt.expression))
+		if (BuiltinFunctionForEVM const* builtin = m_dialect.builtin(funCall->functionName.name))
+			if (builtin->controlFlowSideEffects.terminates)
+			{
+				m_currentBlock->exit = DFG::BasicBlock::Terminated{};
+				m_currentBlock = &m_graph.makeBlock();
+			}
 }
 
 void DataFlowGraphBuilder::operator()(Block const& _block)
@@ -235,11 +275,13 @@ void DataFlowGraphBuilder::makeConditionalJump(StackSlot _condition, DFG::BasicB
 	_zero.entries.emplace_back(m_currentBlock);
 	m_currentBlock = nullptr;
 }
-void DataFlowGraphBuilder::jump(DFG::BasicBlock& _target)
+void DataFlowGraphBuilder::jump(DFG::BasicBlock& _target, bool backwards)
 {
 	yulAssert(m_currentBlock, "");
-	m_currentBlock->exit = DFG::BasicBlock::Jump{&_target};
+	m_currentBlock->exit = DFG::BasicBlock::Jump{&_target, backwards};
 	_target.entries.emplace_back(m_currentBlock);
+	if (backwards)
+		_target.backwardEntries.emplace_back(&_target);
 	m_currentBlock = &_target;
 }
 void DataFlowGraphBuilder::operator()(If const& _if)
@@ -270,14 +312,17 @@ void DataFlowGraphBuilder::operator()(Switch const& _switch)
 			yul::Identifier{{}, "eq"_yulstring},
 			{_value, Identifier{{}, YulString("GHOST[" + to_string(ghostVariableId) + "]")}}
 		});
+		size_t ghostCallID = m_graph.functionCallsByID.size();
+		m_graph.functionCallIDs[&ghostCall] = ghostCallID;
+		m_graph.functionCallsByID.emplace_back(&ghostCall);
 
 		BuiltinFunctionForEVM const* builtin = m_dialect.equalityFunction({});
 		yulAssert(builtin, "");
 
 		DFG::Operation& operation = m_currentBlock->operations.emplace_back(DFG::Operation{
 			Stack{VariableSlot{&ghostVar}, LiteralSlot{valueOfLiteral(_value), {}}},
-			Stack{TemporarySlot{&ghostCall, 0}},
-			DFG::BuiltinCall{_switch.debugData, builtin, &ghostCall, 2},
+			Stack{TemporarySlot{ghostCallID, 0}},
+			DFG::BuiltinCall{_switch.debugData, builtin, &ghostCall, ghostCallID, 2},
 		});
 
 		return operation.output.front();
@@ -310,6 +355,15 @@ void DataFlowGraphBuilder::operator()(ForLoop const& _loop)
 	ScopedSaveAndRestore scopeRestore(m_scope, m_info.scopes.at(&_loop.pre).get());
 	(*this)(_loop.pre);
 
+	std::optional<bool> constantCondition;
+	if (auto const* literalCondition = get_if<yul::Literal>(_loop.condition.get()))
+	{
+		if (valueOfLiteral(*literalCondition) == 0)
+			constantCondition = false;
+		else
+			constantCondition = true;
+	}
+
 	DFG::BasicBlock& loopCondition = m_graph.makeBlock();
 	DFG::BasicBlock& loopBody = m_graph.makeBlock();
 	DFG::BasicBlock& post = m_graph.makeBlock();
@@ -317,13 +371,31 @@ void DataFlowGraphBuilder::operator()(ForLoop const& _loop)
 
 	ScopedSaveAndRestore scopedSaveAndRestore(m_forLoopInfo, ForLoopInfo{&afterLoop, &post});
 
-	jump(loopCondition);
-	makeConditionalJump(std::visit(*this, *_loop.condition), loopBody, afterLoop);
-	m_currentBlock = &loopBody;
-	(*this)(_loop.body);
-	jump(post);
-	(*this)(_loop.post);
-	jump(loopCondition);
+	if (constantCondition.has_value())
+	{
+		if (*constantCondition)
+		{
+			jump(loopBody);
+			(*this)(_loop.body);
+			jump(post);
+			(*this)(_loop.post);
+			jump(loopBody, true);
+		}
+		else
+		{
+			jump(afterLoop);
+		}
+	}
+	else
+	{
+		jump(loopCondition);
+		makeConditionalJump(std::visit(*this, *_loop.condition), loopBody, afterLoop);
+		m_currentBlock = &loopBody;
+		(*this)(_loop.body);
+		jump(post);
+		(*this)(_loop.post);
+		jump(loopCondition, true);
+	}
 
 	m_currentBlock = &afterLoop;
 }
