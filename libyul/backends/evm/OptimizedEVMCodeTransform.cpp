@@ -445,6 +445,22 @@ public:
 				BlockGenerationInfo const& targetInfo = m_info.blockInfos.at(_jump.target);
 				DEBUG(cout << "F: CURRENT " << stackToString(m_stack) << " => " << stackToString(targetInfo.entryLayout) << std::endl;)
 				createStackLayout(targetInfo.entryLayout);
+				/*
+				 Actually this should be done, but since the stack shuffling doesn't allow anything for Junk slots, but explicitly "creates"
+				 them this actually *costs* currently:
+				 Similarly for the conditional case.
+				 Probably even better to do it when assigning the entry layouts.
+				createStackLayout(targetInfo.entryLayout | ranges::views::transform([&](StackSlot const& _slot) -> StackSlot {
+					if (!_jump.target->operations.empty())
+					{
+						OptimizedCodeTransformContext::OperationInfo const& operationInfo = m_info.operationStacks.at(&_jump.target->operations.front());
+						if (!util::findOffset(operationInfo.entryStack, _slot))
+							return JunkSlot{};
+					}
+					return _slot;
+				}) | ranges::to<Stack>);
+				m_stack = targetInfo.entryLayout;
+				 */
 
 				if (!m_blockLabels.count(_jump.target) && _jump.target->entries.size() == 1)
 					(*this)(*_jump.target);
@@ -532,8 +548,7 @@ public:
 		}, _block.exit);
 	}
 
-
-	void createStackLayout(Stack _targetStack)
+	bool tryCreateStackLayout(Stack _targetStack)
 	{
 		Stack commonPrefix;
 		for (auto&& [slot1, slot2]: ranges::zip_view(m_stack, _targetStack))
@@ -543,6 +558,112 @@ public:
 			commonPrefix.emplace_back(slot1);
 		}
 		Stack temporaryStack = m_stack | ranges::views::drop(commonPrefix.size()) | ranges::to<Stack>;
+
+		bool good = true;
+		::createStackLayout(temporaryStack, _targetStack  | ranges::views::drop(commonPrefix.size()) | ranges::to<Stack>, [&](unsigned _i) {
+			if (_i > 16)
+				good = false;
+		}, [&](unsigned _i) {
+			if (_i > 16)
+				good = false;
+		}, [&](StackSlot const& _slot) {
+			Stack currentFullStack = commonPrefix;
+			for (auto slot: temporaryStack)
+				currentFullStack.emplace_back(slot);
+			if (auto depth = util::findOffset(currentFullStack | ranges::views::reverse, _slot))
+			{
+				if (*depth + 1 > 16)
+					good = false;
+				return;
+			}
+		}, [&]() {});
+		return good;
+	}
+
+	void compressStack()
+	{
+		DEBUG(std::cout << "COMPRESS STACK" << std::endl;)
+		static constexpr auto canBeRegenerated = [](StackSlot const& _slot) -> bool {
+			if (auto* returnSlot = get_if<ReturnLabelSlot>(&_slot))
+				if (returnSlot->callID)
+					return true;
+			if (holds_alternative<LiteralSlot>(_slot))
+				return true;
+			return false;
+		};
+		while (!m_stack.empty())
+		{
+			auto top = m_stack.back();
+			if (canBeRegenerated(top))
+			{
+				m_assembly.appendInstruction(evmasm::Instruction::POP);
+				m_stack.pop_back();
+				continue;
+			}
+			if (auto offset = util::findOffset(m_stack, top))
+				if (*offset < m_stack.size() - 1)
+				{
+					m_assembly.appendInstruction(evmasm::Instruction::POP);
+					m_stack.pop_back();
+					continue;
+				}
+
+			size_t topSize = m_stack.size() > 16 ? 16 : m_stack.size();
+			for (auto&& [offset, slot]: (m_stack | ranges::views::take_last(topSize)) | ranges::views::enumerate)
+			{
+				if (offset == topSize - 1)
+					return;
+				if (canBeRegenerated(slot))
+				{
+					std::swap(m_stack.back(), m_stack.at(m_stack.size() - topSize + offset));
+					m_assembly.appendInstruction(evmasm::swapInstruction(static_cast<unsigned>(topSize - 1 - offset)));
+					m_stack.pop_back();
+					m_assembly.appendInstruction(evmasm::Instruction::POP);
+					break;
+				}
+			}
+		}
+	}
+
+	void createStackLayout(Stack _targetStack)
+	{
+/*
+		if (!tryCreateStackLayout(_targetStack))
+			compressStack();
+*/
+		Stack commonPrefix;
+		for (auto&& [slot1, slot2]: ranges::zip_view(m_stack, _targetStack))
+		{
+			if (!(slot1 == slot2))
+				break;
+			commonPrefix.emplace_back(slot1);
+		}
+
+		Stack temporaryStack = m_stack | ranges::views::drop(commonPrefix.size()) | ranges::to<Stack>;
+
+		if (!tryCreateStackLayout(_targetStack))
+		{
+			// TODO: check if we can do better.
+			std::map<unsigned, StackSlot> slotsByDepth;
+			for (auto slot: _targetStack | ranges::views::take_last(_targetStack.size() - commonPrefix.size()))
+			{
+				auto offset = util::findOffset(m_stack | ranges::views::reverse | ranges::to<Stack>, slot);
+				if (offset)
+					slotsByDepth.insert(std::make_pair(*offset, slot));
+			}
+			for (auto slot: slotsByDepth | ranges::views::reverse | ranges::views::values)
+			{
+				if (!util::findOffset(temporaryStack, slot))
+				{
+					auto offset = util::findOffset(m_stack | ranges::views::reverse | ranges::to<Stack>, slot);
+					m_stack.emplace_back(slot);
+					m_assembly.appendInstruction(evmasm::dupInstruction(static_cast<unsigned>(*offset + 1)));
+				}
+			}
+
+			temporaryStack = m_stack | ranges::views::drop(commonPrefix.size()) | ranges::to<Stack>;
+		}
+
 
 		DEBUG(cout << "F: CREATE " << stackToString(_targetStack) << " FROM " << stackToString(m_stack) << std::endl;)
 		DEBUG(if (!commonPrefix.empty())
