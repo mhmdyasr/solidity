@@ -55,13 +55,11 @@ typename std::set<Key,Compare,Alloc>::size_type
 erase_if(std::set<Key,Compare,Alloc>& c, Pred pred)
 {
 	auto old_size = c.size();
-	for (auto i = c.begin(), last = c.end(); i != last;) {
-		if (pred(*i)) {
+	for (auto i = c.begin(), last = c.end(); i != last;)
+		if (pred(*i))
 			i = c.erase(i);
-		} else {
+		else
 			++i;
-		}
-	}
 	return static_cast<typename std::set<Key,Compare,Alloc>::size_type>(old_size - c.size());
 }
 

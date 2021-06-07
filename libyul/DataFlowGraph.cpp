@@ -252,7 +252,7 @@ void DataFlowGraphBuilder::operator()(ExpressionStatement const& _exprStmt)
 void DataFlowGraphBuilder::operator()(Block const& _block)
 {
 	ScopedSaveAndRestore saveScope(m_scope, m_info.scopes.at(&_block).get());
-	for(auto const& statement: _block.statements)
+	for (auto const& statement: _block.statements)
 		std::visit(*this, statement);
 }
 
@@ -328,7 +328,7 @@ void DataFlowGraphBuilder::operator()(Switch const& _switch)
 		return operation.output.front();
 	};
 	DFG::BasicBlock& afterSwitch = m_graph.makeBlock();
-	for(auto const& switchCase: _switch.cases | ranges::views::drop_last(1))
+	for (auto const& switchCase: _switch.cases | ranges::views::drop_last(1))
 	{
 		yulAssert(switchCase.value, "");
 		auto&& [caseBranch, elseBranch] = makeConditionalJump(makeValueCompare(*switchCase.value));

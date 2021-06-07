@@ -227,7 +227,7 @@ void CodeGenerator::operator()(DFG::Assignment const& _assignment)
 		DEBUG(cout << var.variable->name.str() << " ";)
 	DEBUG(cout << ") pre: " << stackToString(m_stack) << std::endl;)
 
-	for(auto& currentSlot: m_stack)
+	for (auto& currentSlot: m_stack)
 		if (VariableSlot const* varSlot = get_if<VariableSlot>(&currentSlot))
 			if (util::findOffset(_assignment.variables, *varSlot))
 				currentSlot = JunkSlot{};
@@ -293,10 +293,12 @@ void CodeGenerator::operator()(DFG::BasicBlock const& _block)
 			DEBUG(cout << "F: CURRENT " << stackToString(m_stack) << " => " << stackToString(targetInfo.entryLayout) << std::endl;)
 			createStackLayout(targetInfo.entryLayout);
 			/*
-			 Actually this should be done, but since the stack shuffling doesn't allow anything for Junk slots, but explicitly "creates"
-			 them this actually *costs* currently:
-			 Similarly for the conditional case.
-			 Probably even better to do it when assigning the entry layouts.
+			 * Actually this should be done, but since the stack shuffling doesn't allow anything for Junk slots, but explicitly "creates"
+			 * them this actually *costs* currently:
+			 * Similarly for the conditional case.
+			 * Probably even better to do it when assigning the entry layouts.
+			 */
+			/*
 			createStackLayout(targetInfo.entryLayout | ranges::views::transform([&](StackSlot const& _slot) -> StackSlot {
 				if (!_jump.target->operations.empty())
 				{
@@ -516,8 +518,10 @@ void CodeGenerator::createStackLayout(Stack _targetStack)
 
 
 	DEBUG(cout << "F: CREATE " << stackToString(_targetStack) << " FROM " << stackToString(m_stack) << std::endl;)
-	DEBUG(if (!commonPrefix.empty())
-			  cout << "   (USE " << stackToString(_targetStack | ranges::views::drop(commonPrefix.size()) | ranges::to<Stack>) << " FROM " << stackToString(temporaryStack) << std::endl;)
+	DEBUG(
+		if (!commonPrefix.empty())
+			cout << "   (USE " << stackToString(_targetStack | ranges::views::drop(commonPrefix.size()) | ranges::to<Stack>) << " FROM " << stackToString(temporaryStack) << std::endl;
+	)
 	::createStackLayout(temporaryStack, _targetStack  | ranges::views::drop(commonPrefix.size()) | ranges::to<Stack>, [&](unsigned _i) {
 		m_assembly.appendInstruction(evmasm::swapInstruction(_i));
 	}, [&](unsigned _i) {
@@ -532,7 +536,7 @@ void CodeGenerator::createStackLayout(Stack _targetStack)
 			return;
 		}
 		std::visit(util::GenericVisitor{
-			[&](LiteralSlot const &_literal)
+			[&](LiteralSlot const& _literal)
 			{
 				m_assembly.setSourceLocation(locationOf(_literal));
 				m_assembly.appendConstant(_literal.value);

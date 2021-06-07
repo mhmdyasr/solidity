@@ -76,7 +76,7 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 
 	if (_currentStack.empty())
 	{
-		while(_currentStack.size() < _targetStack.size())
+		while (_currentStack.size() < _targetStack.size())
 		{
 			StackSlot newSlot = _targetStack.at(_currentStack.size());
 			_push(newSlot);
@@ -103,7 +103,7 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 
 		// Current top is in place.
 		// Dup deepest one to be dupped (TODO: choose optimal).
-		for(auto&& [offset, slot]: _currentStack | ranges::views::enumerate)
+		for (auto&& [offset, slot]: _currentStack | ranges::views::enumerate)
 		{
 			if (findAllOffsets(_currentStack, slot).size() < findAllOffsets(_targetStack, slot).size())
 			{
@@ -121,7 +121,7 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 			}
 		}
 		// Nothing to dup. Find anything to be pushed and push it.
-		for(auto const& slot: _targetStack)
+		for (auto const& slot: _targetStack)
 		{
 			if (!util::findOffset(_currentStack, slot))
 			{
@@ -174,7 +174,7 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 		}
 
 		// There needs to be something to dup or push. Try dupping. (TODO: suboptimal)
-		for(auto&& [offset, slot]: _currentStack | ranges::views::enumerate)
+		for (auto&& [offset, slot]: _currentStack | ranges::views::enumerate)
 		{
 			if (findAllOffsets(_currentStack, slot).size() < findAllOffsets(_targetStack, slot).size())
 			{
@@ -192,7 +192,7 @@ void createStackLayout(Stack& _currentStack, Stack const& _targetStack, Swap _sw
 			}
 		}
 		// Nothing to dup. Find anything to be pushed and push it.
-		for(auto const& slot: _targetStack)
+		for (auto const& slot: _targetStack)
 		{
 			if (!util::findOffset(_currentStack, slot))
 			{

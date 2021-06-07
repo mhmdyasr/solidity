@@ -94,7 +94,7 @@ Stack createIdealLayout(Stack const& post, vector<variant<PreviousSlot, set<unsi
 	}, [&](unsigned _i) {
 		auto positions = get_if<set<unsigned>>(&layout.at(layout.size() - _i));
 		yulAssert(positions, "");
-		if(positions->count(static_cast<unsigned>(layout.size())))
+		if (positions->count(static_cast<unsigned>(layout.size())))
 		{
 			positions->erase(static_cast<unsigned>(layout.size()));
 			layout.emplace_back(set<unsigned>{static_cast<unsigned>(layout.size())});
@@ -128,7 +128,7 @@ Stack createIdealLayout(Stack const& post, vector<variant<PreviousSlot, set<unsi
 		if (PreviousSlot* previousSlot = std::get_if<PreviousSlot>(&idealPosition))
 			idealLayout.at(previousSlot->slot) = slot;
 
-	while(!idealLayout.empty() && !idealLayout.back())
+	while (!idealLayout.empty() && !idealLayout.back())
 		idealLayout.pop_back();
 
 	return idealLayout | ranges::views::transform([](optional<StackSlot> s) {
@@ -145,9 +145,11 @@ void StackLayoutGenerator::operator()(DFG::Operation const& _operation)
 	OptimizedCodeTransformContext::OperationInfo& operationInfo = m_context.operationStacks[&_operation];
 	operationInfo.exitStack = *m_stack;
 
-	DEBUG(cout << "OPERATION post:   " << stackToString(*m_stack) << std::endl
-			   << "          input:  " << stackToString(_operation.input) << std::endl
-			   << "          output: " << stackToString(_operation.output) << std::endl);
+	DEBUG(
+		cout << "OPERATION post:   " << stackToString(*m_stack) << std::endl
+			<< "          input:  " << stackToString(_operation.input) << std::endl
+			<< "          output: " << stackToString(_operation.output) << std::endl;
+	)
 
 	vector<set<unsigned>> targetPositions(_operation.output.size(), set<unsigned>{});
 	size_t numToKeep = 0;
@@ -345,7 +347,7 @@ Stack StackLayoutGenerator::operator()(DFG::BasicBlock const& _block, Stack _ini
 
 	DEBUG(cout << "B: EXIT LAYOUT (" << &_block << "): " << stackToString(currentStack) << std::endl;)
 
-	for(auto& operation: _block.operations | ranges::views::reverse)
+	for (auto& operation: _block.operations | ranges::views::reverse)
 		(*this)(operation);
 
 	DEBUG(cout << "B: ENTRY LAYOUT (" << &_block << "): " << stackToString(currentStack) << std::endl;)
