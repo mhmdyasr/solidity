@@ -37,13 +37,12 @@ using namespace solidity;
 using namespace solidity::yul;
 using namespace std;
 
-#define DEBUG(x) (void)0;
-
 namespace
 {
 struct PreviousSlot { size_t slot; };
 
-#if 0
+#if 1
+#define DEBUG(x) x
 string stackSlotToString(StackSlot const& _slot)
 {
 	return std::visit(util::GenericVisitor{
@@ -63,6 +62,8 @@ string stackToString(Stack const& _stack)
 	result += ']';
 	return result;
 }
+#else
+#define DEBUG(x) (void)0;
 #endif
 
 template<typename Range, typename Value>
@@ -627,10 +628,8 @@ public:
 
 	void createStackLayout(Stack _targetStack)
 	{
-/*
-		if (!tryCreateStackLayout(_targetStack))
-			compressStack();
-*/
+		DEBUG(cout << "F: CREATE " << stackToString(_targetStack) << " FROM " << stackToString(m_stack) << std::endl;)
+
 		Stack commonPrefix;
 		for (auto&& [slot1, slot2]: ranges::zip_view(m_stack, _targetStack))
 		{
@@ -644,6 +643,7 @@ public:
 		if (!tryCreateStackLayout(_targetStack))
 		{
 			// TODO: check if we can do better.
+			// Maybe switching to a general "fix everything deep first" algorithm.
 			std::map<unsigned, StackSlot> slotsByDepth;
 			for (auto slot: _targetStack | ranges::views::take_last(_targetStack.size() - commonPrefix.size()))
 			{
@@ -657,6 +657,10 @@ public:
 				{
 					auto offset = util::findOffset(m_stack | ranges::views::reverse | ranges::to<Stack>, slot);
 					m_stack.emplace_back(slot);
+					DEBUG(
+						if (*offset + 1 > 16)
+							std::cout << "Cannot reach slot: " << stackSlotToString(slot) << std::endl;
+					)
 					m_assembly.appendInstruction(evmasm::dupInstruction(static_cast<unsigned>(*offset + 1)));
 				}
 			}
