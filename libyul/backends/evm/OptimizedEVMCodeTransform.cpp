@@ -168,7 +168,7 @@ void CodeGenerator::validateSlot(StackSlot const& _slot, Expression const& _expr
 		},
 		[&](yul::FunctionCall const& _call) {
 			auto* temporarySlot = get_if<TemporarySlot>(&_slot);
-			yulAssert(temporarySlot && m_info.dfg->functionCallsByID.at(temporarySlot->callID) == &_call, "");
+			yulAssert(temporarySlot && temporarySlot->call == &_call, "");
 		}
 	}, _expression);
 }
@@ -194,7 +194,7 @@ void CodeGenerator::operator()(DFG::FunctionCall const& _call)
 	for (size_t i = 0; i < _call.function->arguments.size() + 1; ++i)
 		m_stack.pop_back();
 	for (size_t i = 0; i < _call.function->returns.size(); ++i)
-		m_stack.emplace_back(TemporarySlot{_call.functionCallID, i});
+		m_stack.emplace_back(TemporarySlot{_call.functionCall, i});
 	DEBUG(cout << "F: function call " << _call.functionCall->functionName.name.str() << " post: " << stackToString(m_stack) << std::endl;)
 }
 
@@ -215,7 +215,7 @@ void CodeGenerator::operator()(DFG::BuiltinCall const& _call)
 	for (size_t i = 0; i < _call.arguments; ++i)
 		m_stack.pop_back();
 	for (size_t i = 0; i < _call.builtin->returns.size(); ++i)
-		m_stack.emplace_back(TemporarySlot{_call.functionCallID, i});
+		m_stack.emplace_back(TemporarySlot{_call.functionCall, i});
 	DEBUG(cout << "F: builtin call " << _call.functionCall->functionName.name.str() << " post: " << stackToString(m_stack) << std::endl;)
 }
 
@@ -434,7 +434,7 @@ void CodeGenerator::compressStack()
 	DEBUG(std::cout << "COMPRESS STACK" << std::endl;)
 	static constexpr auto canBeRegenerated = [](StackSlot const& _slot) -> bool {
 		if (auto* returnSlot = get_if<ReturnLabelSlot>(&_slot))
-			if (returnSlot->callID)
+			if (returnSlot->call)
 				return true;
 		if (holds_alternative<LiteralSlot>(_slot))
 			return true;
@@ -543,12 +543,11 @@ void CodeGenerator::createStackLayout(Stack _targetStack)
 			},
 			[&](ReturnLabelSlot const& _returnLabel)
 			{
-				yulAssert(_returnLabel.callID, "Cannot produce function return label.");
-				yul::FunctionCall const* call = m_info.dfg->functionCallsByID.at(*_returnLabel.callID);
+				yulAssert(_returnLabel.call, "Cannot produce function return label.");
 				// TODO: maybe actually use IDs to index into returnLabels.
-				if (!m_returnLabels.count(call))
-					m_returnLabels[call] = m_assembly.newLabelId();
-				m_assembly.appendLabelReference(m_returnLabels.at(call));
+				if (!m_returnLabels.count(_returnLabel.call))
+					m_returnLabels[_returnLabel.call] = m_assembly.newLabelId();
+				m_assembly.appendLabelReference(m_returnLabels.at(_returnLabel.call));
 			},
 			[&](VariableSlot const& _variable)
 			{

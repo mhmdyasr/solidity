@@ -111,10 +111,6 @@ DFG::Operation& DataFlowGraphBuilder::visitFunctionCall(FunctionCall const& _cal
 	yulAssert(m_scope, "");
 	yulAssert(m_currentBlock, "");
 
-	size_t callID = m_graph.functionCallsByID.size();
-	yulAssert(m_graph.functionCallIDs.insert(std::make_pair(&_call, callID)).second, "Visited function call twice.");
-	m_graph.functionCallsByID.emplace_back(&_call);
-
 	if (BuiltinFunctionForEVM const* builtin = m_dialect.builtin(_call.functionName.name))
 	{
 		DFG::Operation& operation = m_currentBlock->operations.emplace_back(DFG::Operation{
@@ -128,11 +124,11 @@ DFG::Operation& DataFlowGraphBuilder::visitFunctionCall(FunctionCall const& _cal
 				return std::visit(*this, _expression);
 			})) | ranges::to<Stack>,
 			{},
-			DFG::BuiltinCall{_call.debugData, builtin, &_call, callID},
+			DFG::BuiltinCall{_call.debugData, builtin, &_call},
 		});
 		std::get<DFG::BuiltinCall>(operation.operation).arguments = operation.input.size();
 		for (size_t i: ranges::views::iota(0u, builtin->returns.size()))
-			operation.output.emplace_back(TemporarySlot{callID, i});
+			operation.output.emplace_back(TemporarySlot{&_call, i});
 		return operation;
 	}
 	else
@@ -144,16 +140,16 @@ DFG::Operation& DataFlowGraphBuilder::visitFunctionCall(FunctionCall const& _cal
 		}), "Function name not found.");
 		yulAssert(function, "");
 		Stack inputs;
-		inputs.emplace_back(ReturnLabelSlot{callID});
+		inputs.emplace_back(ReturnLabelSlot{&_call});
 		for (Expression const& _expression: _call.arguments | ranges::views::reverse)
 			inputs.emplace_back(std::visit(*this, _expression));
 		DFG::Operation& operation = m_currentBlock->operations.emplace_back(DFG::Operation{
 			inputs,
 			{},
-			DFG::FunctionCall{_call.debugData, function, &_call, callID}
+			DFG::FunctionCall{_call.debugData, function, &_call}
 		});
 		for (size_t i: ranges::views::iota(0u, function->returns.size()))
-			operation.output.emplace_back(TemporarySlot{callID, i});
+			operation.output.emplace_back(TemporarySlot{&_call, i});
 		return operation;
 	}
 }
@@ -312,17 +308,14 @@ void DataFlowGraphBuilder::operator()(Switch const& _switch)
 			yul::Identifier{{}, "eq"_yulstring},
 			{_value, Identifier{{}, YulString("GHOST[" + to_string(ghostVariableId) + "]")}}
 		});
-		size_t ghostCallID = m_graph.functionCallsByID.size();
-		m_graph.functionCallIDs[&ghostCall] = ghostCallID;
-		m_graph.functionCallsByID.emplace_back(&ghostCall);
 
 		BuiltinFunctionForEVM const* builtin = m_dialect.equalityFunction({});
 		yulAssert(builtin, "");
 
 		DFG::Operation& operation = m_currentBlock->operations.emplace_back(DFG::Operation{
 			Stack{VariableSlot{&ghostVar}, LiteralSlot{valueOfLiteral(_value), {}}},
-			Stack{TemporarySlot{ghostCallID, 0}},
-			DFG::BuiltinCall{_switch.debugData, builtin, &ghostCall, ghostCallID, 2},
+			Stack{TemporarySlot{&ghostCall, 0}},
+			DFG::BuiltinCall{_switch.debugData, builtin, &ghostCall, 2},
 		});
 
 		return operation.output.front();

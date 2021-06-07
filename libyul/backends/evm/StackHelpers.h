@@ -31,10 +31,10 @@ namespace solidity::yul
 inline std::string stackSlotToString(StackSlot const& _slot)
 {
 	return std::visit(util::GenericVisitor{
-		[](ReturnLabelSlot const& _ret) -> std::string { return "RET[" + (_ret.callID ? std::to_string(*_ret.callID) : "") + "]"; },
+		[](ReturnLabelSlot const& _ret) -> std::string { return "RET[" + (_ret.call ? _ret.call->functionName.name.str() : "") + "]"; },
 		[](VariableSlot const& _var) { return _var.variable->name.str(); },
 		[](LiteralSlot const& _lit) { return util::toCompactHexWithPrefix(_lit.value); },
-		[](TemporarySlot const& _tmp) -> std::string { return "TMP[" + std::to_string(_tmp.callID) + ", " + std::to_string(_tmp.idx) + "]"; },
+		[](TemporarySlot const& _tmp) -> std::string { return "TMP[" + _tmp.call->functionName.name.str() + ", " + std::to_string(_tmp.idx) + "]"; },
 		[](JunkSlot const&) -> std::string { return "JUNK"; }
 	}, _slot);
 }

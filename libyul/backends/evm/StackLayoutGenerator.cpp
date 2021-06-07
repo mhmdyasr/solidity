@@ -188,7 +188,7 @@ void StackLayoutGenerator::operator()(DFG::Operation const& _operation)
 	cxx20::erase_if(*m_stack, [](StackSlot const& _slot) {
 		if (auto const* returnLabelSlot = std::get_if<ReturnLabelSlot>(&_slot))
 		{
-			if (returnLabelSlot->callID)
+			if (returnLabelSlot->call)
 				return true;
 		}
 		return false;
@@ -201,7 +201,7 @@ void StackLayoutGenerator::operator()(DFG::Operation const& _operation)
 			// We can always push return labels of function calls.
 		else if (auto const* returnLabelSlot = std::get_if<ReturnLabelSlot>(&slot))
 		{
-			if (returnLabelSlot->callID)
+			if (returnLabelSlot->call)
 				m_stack->pop_back();
 			else
 				break;
@@ -221,7 +221,7 @@ void StackLayoutGenerator::operator()(DFG::Operation const& _operation)
 			if (holds_alternative<LiteralSlot>(slot))
 				continue;
 			if (auto* retLabel = get_if<ReturnLabelSlot>(&slot))
-				if (retLabel->callID)
+				if (retLabel->call)
 					continue;
 			if (util::findOffset(newStack, slot))
 				continue;
@@ -382,7 +382,7 @@ Stack StackLayoutGenerator::combineStack(Stack const& _stack1, Stack const& _sta
 	Stack stack2 = _stack2 | ranges::views::drop(commonPrefix.size()) | ranges::to<Stack>;
 	cxx20::erase_if(stack1, [](StackSlot const& slot) {
 		if (ReturnLabelSlot const* returnSlot = get_if<ReturnLabelSlot>(&slot))
-			if (returnSlot->callID)
+			if (returnSlot->call)
 				return true;
 		if (holds_alternative<LiteralSlot>(slot))
 			return true;
@@ -390,7 +390,7 @@ Stack StackLayoutGenerator::combineStack(Stack const& _stack1, Stack const& _sta
 	});
 	cxx20::erase_if(stack2, [](StackSlot const& slot) {
 		if (ReturnLabelSlot const* returnSlot = get_if<ReturnLabelSlot>(&slot))
-			if (returnSlot->callID)
+			if (returnSlot->call)
 				return true;
 		if (holds_alternative<LiteralSlot>(slot))
 			return true;
