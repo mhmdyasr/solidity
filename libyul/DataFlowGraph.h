@@ -70,7 +70,6 @@ struct JunkSlot
 using StackSlot = std::variant<ReturnLabelSlot, VariableSlot, LiteralSlot, TemporarySlot, JunkSlot>;
 using Stack = std::deque<StackSlot>;
 
-
 struct DFG
 {
 	explicit DFG() {}
