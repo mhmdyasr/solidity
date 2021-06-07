@@ -31,6 +31,7 @@
 #include <range/v3/to_container.hpp>
 #include <range/v3/view/drop.hpp>
 #include <range/v3/view/drop_last.hpp>
+#include <range/v3/view/map.hpp>
 #include <range/v3/view/reverse.hpp>
 #include <range/v3/view/take.hpp>
 #include <range/v3/view/transform.hpp>
@@ -465,4 +466,56 @@ Stack StackLayoutGenerator::combineStack(Stack const& _stack1, Stack const& _sta
 	for (auto slot: sortedCandidates.begin()->second)
 		commonPrefix.emplace_back(slot);
 	return commonPrefix;
+}
+
+void StackLayoutGenerator::stitchTogether(DFG::BasicBlock& _block, std::set<DFG::BasicBlock const*>& _visited)
+{
+	if (_visited.count(&_block))
+		return;
+	_visited.insert(&_block);
+	auto& info = m_context.blockInfos.at(&_block);
+	std::visit(util::GenericVisitor{
+		[&](std::monostate)
+		{
+		},
+		[&](DFG::BasicBlock::Jump const& _jump)
+		{
+			/*auto& targetInfo = context.blockInfos.at(_jump.target);
+			// TODO: Assert correctness, resp. achievability of layout.
+			targetInfo.entryLayout = info.exitLayout;*/
+			if (!_jump.backwards)
+				stitchTogether(*_jump.target, _visited);
+		},
+		[&](DFG::BasicBlock::ConditionalJump const& _conditionalJump)
+		{
+			auto& zeroTargetInfo = m_context.blockInfos.at(_conditionalJump.zero);
+			auto& nonZeroTargetInfo = m_context.blockInfos.at(_conditionalJump.nonZero);
+			// TODO: Assert correctness, resp. achievability of layout.
+			Stack exitLayout = info.exitLayout;
+			yulAssert(!exitLayout.empty(), "");
+			exitLayout.pop_back();
+			zeroTargetInfo.entryLayout = exitLayout;
+			nonZeroTargetInfo.entryLayout = exitLayout;
+			stitchTogether(*_conditionalJump.zero, _visited);
+			stitchTogether(*_conditionalJump.nonZero, _visited);
+		},
+		[&](DFG::BasicBlock::FunctionReturn const&)
+		{
+		},
+		[&](DFG::BasicBlock::Terminated const&) { },
+	}, _block.exit);
+
+}
+
+void StackLayoutGenerator::run(OptimizedCodeTransformContext& _context)
+{
+	StackLayoutGenerator stackLayoutGenerator{_context};
+	stackLayoutGenerator(*_context.dfg->entry, {});
+	for (auto& functionInfo: _context.dfg->functions | ranges::views::values)
+		stackLayoutGenerator(*functionInfo.entry, {});
+
+	std::set<DFG::BasicBlock const*> visited;
+	stackLayoutGenerator.stitchTogether(*_context.dfg->entry, visited);
+	for (auto& functionInfo: _context.dfg->functions | ranges::views::values)
+		stackLayoutGenerator.stitchTogether(*functionInfo.entry, visited);
 }

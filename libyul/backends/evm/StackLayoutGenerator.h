@@ -33,7 +33,7 @@ struct OptimizedCodeTransformContext;
 class StackLayoutGenerator
 {
 public:
-	StackLayoutGenerator(OptimizedCodeTransformContext& _context);
+	static void run(OptimizedCodeTransformContext& _context);
 
 	Stack operator()(DFG::BasicBlock const& _block, Stack _initialExitLayout);
 
@@ -44,6 +44,9 @@ public:
 	void operator()(DFG::Assignment const& _literal);
 
 private:
+	StackLayoutGenerator(OptimizedCodeTransformContext& _context);
+
+	void stitchTogether(DFG::BasicBlock& _block, std::set<DFG::BasicBlock const*>& _visited);
 
 	OptimizedCodeTransformContext& m_context;
 

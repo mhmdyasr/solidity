@@ -644,65 +644,10 @@ void OptimizedCodeTransform::run(
 	DEBUG(cout << std::endl << std::endl;)
 	DEBUG(cout << "GENERATE STACK LAYOUTS" << std::endl;)
 	DEBUG(cout << std::endl << std::endl;)
-
-	{
-		StackLayoutGenerator stackLayoutGenerator{context};
-		stackLayoutGenerator(*context.dfg->entry, {});
-		for (auto& functionInfo: context.dfg->functions | ranges::views::values)
-		{
-			stackLayoutGenerator(*functionInfo.entry, {});
-		}
-	}
-
-
-	{
-		std::set<DFG::BasicBlock const*> visited;
-		auto recurse = [&](DFG::BasicBlock& _block, auto _recurse) -> void {
-			if (visited.count(&_block))
-				return;
-			visited.insert(&_block);
-			auto& info = context.blockInfos.at(&_block);
-			std::visit(util::GenericVisitor{
-				[&](std::monostate)
-				{
-				},
-				[&](DFG::BasicBlock::Jump const& _jump)
-				{
-					/*auto& targetInfo = context.blockInfos.at(_jump.target);
-					// TODO: Assert correctness, resp. achievability of layout.
-					targetInfo.entryLayout = info.exitLayout;*/
-					if (!_jump.backwards)
-						_recurse(*_jump.target, _recurse);
-				},
-				[&](DFG::BasicBlock::ConditionalJump const& _conditionalJump)
-				{
-					auto& zeroTargetInfo = context.blockInfos.at(_conditionalJump.zero);
-					auto& nonZeroTargetInfo = context.blockInfos.at(_conditionalJump.nonZero);
-					// TODO: Assert correctness, resp. achievability of layout.
-					Stack exitLayout = info.exitLayout;
-					yulAssert(!exitLayout.empty(), "");
-					exitLayout.pop_back();
-					zeroTargetInfo.entryLayout = exitLayout;
-					nonZeroTargetInfo.entryLayout = exitLayout;
-					_recurse(*_conditionalJump.zero, _recurse);
-					_recurse(*_conditionalJump.nonZero, _recurse);
-				},
-				[&](DFG::BasicBlock::FunctionReturn const&)
-				{
-				},
-				[&](DFG::BasicBlock::Terminated const&) { },
-			}, _block.exit);
-		};
-		recurse(*context.dfg->entry, recurse);
-		for (auto& functionInfo: context.dfg->functions | ranges::views::values)
-		{
-			recurse(*functionInfo.entry, recurse);
-		}
-	}
+	StackLayoutGenerator::run(context);
 
 	DEBUG(cout << std::endl << std::endl;)
 	DEBUG(cout << "FORWARD CODEGEN" << std::endl;)
 	DEBUG(cout << std::endl << std::endl;)
-
 	CodeGenerator::run(_assembly, _builtinContext, _useNamedLabelsForFunctions, context, *context.dfg->entry);
 }
